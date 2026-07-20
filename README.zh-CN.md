@@ -21,9 +21,23 @@ Windows 的虚拟桌面是全局的：按 `Win+Ctrl+←/→` 会**同时切换�
 
 ## 安装
 
-1. 如未安装，请先安装 [.NET 8 桌面运行时](https://dotnet.microsoft.com/download/dotnet/8.0)。
-2. 从 [Releases](https://github.com/harungecit/IndepenDesk/releases) 下载 `IndepenDesk-vX.Y.Z-win-x64.zip`，解压后运行 `IndepenDesk.exe`。
-3. 程序驻留在系统托盘。开机自启：`Win+R` → `shell:startup` → 放入快捷方式。
+支持 Windows 10 (1607+) 和 Windows 11 的 **x64、x86 和 ARM64**。所有安装包均为独立部署 — 无需安装 .NET 运行时。
+
+**winget：**
+
+```
+winget install harungecit.IndepenDesk
+```
+
+**安装程序（推荐）：** 从 [Releases](https://github.com/harungecit/IndepenDesk/releases) 下载 `IndepenDesk-Setup-<版本>-<架构>.exe` 并运行 — 可选开机自启和桌面图标，提供 7 种安装语言。
+
+**MSI**（企业 / GPO 部署）：`IndepenDesk-<版本>-<架构>.msi`。
+
+**便携版：** `IndepenDesk-v<版本>-win-<架构>.zip` — 解压即用，无需安装。
+
+**MSIX：** 使用自签名证书签名 — 请先将 `IndepenDesk.cer` 安装到*本地计算机 → 受信任人*，然后双击 `.msix`。
+
+程序驻留在系统托盘（两个蓝色屏幕图标）。
 
 ## 快捷键
 
@@ -55,14 +69,6 @@ IndepenDesk 不使用（也无法修改）Windows 的全局虚拟桌面系统。
 - 系统原生的 `Win+Ctrl+←/→` 仍会触发全局切换 — 不使用即可。
 - `Ctrl+Alt+←/→` 可能与 Intel 显卡的"旋转屏幕"热键冲突；如有需要请在 Intel 设置中禁用。
 - Windows 11 任务栏的右键菜单无法被第三方扩展；请使用总览中的右键菜单。
-
-## 构建
-
-```
-dotnet publish -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true -o publish
-```
-
-需要 .NET 8 SDK。推送 `v*` 标签后，GitHub Actions 会自动构建发布版本。
 
 ## 许可证
 

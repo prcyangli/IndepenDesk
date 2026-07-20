@@ -9,7 +9,9 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>IndepenDesk</AssemblyName>
     <RootNamespace>IndepenDesk</RootNamespace>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
+    <ApplicationIcon>packaging\app.ico</ApplicationIcon>
+    <RuntimeIdentifiers>win-x64;win-x86;win-arm64</RuntimeIdentifiers>
     <Authors>harungecit</Authors>
     <RepositoryUrl>https://github.com/harungecit/IndepenDesk</RepositoryUrl>
     <Description>Independent virtual desktops per monitor for Windows — macOS-style Spaces behavior.</Description>

@@ -21,9 +21,23 @@ Les bureaux virtuels de Windows sont globaux : `Win+Ctrl+←/→` change **tous 
 
 ## Installation
 
-1. Installez le [runtime .NET 8 Desktop](https://dotnet.microsoft.com/download/dotnet/8.0) si nécessaire.
-2. Téléchargez `IndepenDesk-vX.Y.Z-win-x64.zip` depuis les [Releases](https://github.com/harungecit/IndepenDesk/releases), extrayez et lancez `IndepenDesk.exe`.
-3. L'application réside dans la zone de notification. Démarrage automatique : `Win+R` → `shell:startup` → déposez-y un raccourci.
+Fonctionne sous Windows 10 (1607+) et Windows 11 sur **x64, x86 et ARM64**. Tous les paquets sont autonomes — aucun runtime .NET requis.
+
+**winget :**
+
+```
+winget install harungecit.IndepenDesk
+```
+
+**Installateur (recommandé) :** téléchargez `IndepenDesk-Setup-<version>-<arch>.exe` depuis les [Releases](https://github.com/harungecit/IndepenDesk/releases) et exécutez-le — démarrage automatique et icône de bureau en option, 7 langues d'installation.
+
+**MSI** (déploiement d'entreprise / GPO) : `IndepenDesk-<version>-<arch>.msi`.
+
+**Portable :** `IndepenDesk-v<version>-win-<arch>.zip` — extrayez et lancez, rien à installer.
+
+**MSIX :** signé avec un certificat auto-signé — installez d'abord `IndepenDesk.cer` dans *Ordinateur local → Personnes autorisées*, puis double-cliquez sur le `.msix`.
+
+L'application réside dans la zone de notification (icône aux deux écrans bleus).
 
 ## Raccourcis
 
@@ -55,14 +69,6 @@ IndepenDesk n'utilise pas le système global de Windows. Il gère des ensembles 
 - Le raccourci natif `Win+Ctrl+←/→` déclenche toujours le changement global — il suffit de ne pas l'utiliser.
 - `Ctrl+Alt+←/→` peut entrer en conflit avec les raccourcis Intel « rotation de l'écran » ; désactivez-les si besoin.
 - Le menu contextuel de la barre des tâches de Windows 11 n'est pas extensible ; utilisez le menu contextuel de la vue d'ensemble.
-
-## Compilation
-
-```
-dotnet publish -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true -o publish
-```
-
-Nécessite le SDK .NET 8. Les releases sont générées automatiquement par GitHub Actions lors du push d'un tag `v*`.
 
 ## Licence
 

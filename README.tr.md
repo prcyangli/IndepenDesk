@@ -21,9 +21,23 @@ Windows'un sanal masaüstleri globaldir: `Win+Ctrl+←/→` **tüm monitörleri 
 
 ## Kurulum
 
-1. Yoksa [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) kurun.
-2. [Releases](https://github.com/harungecit/IndepenDesk/releases) sayfasından `IndepenDesk-vX.Y.Z-win-x64.zip` indirin, açın ve `IndepenDesk.exe`'yi çalıştırın.
-3. Sistem tepsisinde durur (iki mavi ekran simgesi). Windows ile başlatmak için: `Win+R` → `shell:startup` → klasöre exe kısayolunu koyun.
+Windows 10 (1607+) ve Windows 11'de **x64, x86 ve ARM64** üzerinde çalışır. Tüm paketler kendi kendine yeterlidir — .NET kurulumu gerekmez.
+
+**winget:**
+
+```
+winget install harungecit.IndepenDesk
+```
+
+**Kurulum sihirbazı (önerilen):** [Releases](https://github.com/harungecit/IndepenDesk/releases) sayfasından `IndepenDesk-Setup-<sürüm>-<mimari>.exe` indirip çalıştırın — isteğe bağlı otomatik başlatma ve masaüstü simgesi, 7 kurulum dili.
+
+**MSI** (kurumsal / GPO dağıtımı): `IndepenDesk-<sürüm>-<mimari>.msi`.
+
+**Taşınabilir:** `IndepenDesk-v<sürüm>-win-<mimari>.zip` — açıp çalıştırın, kurulum gerekmez.
+
+**MSIX:** öz imzalı sertifikayla imzalıdır — önce `IndepenDesk.cer` dosyasını *Yerel Makine → Güvenilen Kişiler* deposuna kurun, sonra `.msix`'e çift tıklayın.
+
+Uygulama sistem tepsisinde durur (iki mavi ekran simgesi).
 
 ## Kısayollar
 
@@ -55,14 +69,6 @@ IndepenDesk, Windows'un global sanal masaüstü sistemini kullanmaz (o sistem d�
 - Yerleşik `Win+Ctrl+←/→` hâlâ global geçişi tetikler — kullanmamak yeterli.
 - `Ctrl+Alt+←/→` bazı Intel ekran sürücülerinde "ekranı döndür" ile çakışabilir; gerekirse Intel ayarlarından kapatın (kayıt başarısız olursa tray bildirimi görürsünüz).
 - Windows 11 görev çubuğu menüsü üçüncü parti uygulamalarca genişletilemez; Genel Bakış'taki sağ tık menüsünü kullanın.
-
-## Derleme
-
-```
-dotnet publish -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true -o publish
-```
-
-.NET 8 SDK gerektirir. `v*` etiketi gönderildiğinde GitHub Actions release'i otomatik derler.
 
 ## Lisans
 

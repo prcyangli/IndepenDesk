@@ -21,9 +21,23 @@ Windows virtual desktops are global: pressing `Win+Ctrl+←/→` switches **all 
 
 ## Installation
 
-1. Install the [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) if you don't have it.
-2. Download `IndepenDesk-vX.Y.Z-win-x64.zip` from [Releases](https://github.com/harungecit/IndepenDesk/releases), extract and run `IndepenDesk.exe`.
-3. It lives in the system tray (two blue screens icon). To start with Windows: `Win+R` → `shell:startup` → drop a shortcut to the exe there.
+Works on Windows 10 (1607+) and Windows 11 on **x64, x86 and ARM64**. All packages are self-contained — no .NET runtime required.
+
+**winget:**
+
+```
+winget install harungecit.IndepenDesk
+```
+
+**Installer (recommended):** download `IndepenDesk-Setup-<version>-<arch>.exe` from [Releases](https://github.com/harungecit/IndepenDesk/releases) and run it — with optional autostart and desktop icon, in 7 setup languages.
+
+**MSI** (corporate / GPO deployment): `IndepenDesk-<version>-<arch>.msi`.
+
+**Portable:** `IndepenDesk-v<version>-win-<arch>.zip` — extract and run, nothing to install.
+
+**MSIX:** signed with a self-signed certificate — first install `IndepenDesk.cer` into *Local Machine → Trusted People*, then double-click the `.msix`.
+
+The app lives in the system tray (two blue screens icon).
 
 ## Shortcuts
 
@@ -55,14 +69,6 @@ IndepenDesk does not use (and cannot fix) Windows' global virtual desktop system
 - The native `Win+Ctrl+←/→` still triggers Windows' global switch — simply don't use it.
 - `Ctrl+Alt+←/→` may clash with Intel graphics "rotate screen" hotkeys; disable those in the Intel graphics settings if needed (a tray notification tells you when registration fails).
 - Windows 11's taskbar context menu cannot be extended by third-party apps; use the Overview's right-click menu instead.
-
-## Building
-
-```
-dotnet publish -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true -o publish
-```
-
-Requires the .NET 8 SDK. Releases are built automatically by GitHub Actions when a `v*` tag is pushed.
 
 ## License
 

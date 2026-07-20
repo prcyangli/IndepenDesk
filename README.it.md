@@ -21,9 +21,23 @@ I desktop virtuali di Windows sono globali: `Win+Ctrl+←/→` cambia **tutti i 
 
 ## Installazione
 
-1. Installa il [runtime .NET 8 Desktop](https://dotnet.microsoft.com/download/dotnet/8.0) se necessario.
-2. Scarica `IndepenDesk-vX.Y.Z-win-x64.zip` dalle [Releases](https://github.com/harungecit/IndepenDesk/releases), estrai ed esegui `IndepenDesk.exe`.
-3. L'app risiede nella barra di sistema. Avvio automatico: `Win+R` → `shell:startup` → inserisci un collegamento all'exe.
+Funziona su Windows 10 (1607+) e Windows 11 su **x64, x86 e ARM64**. Tutti i pacchetti sono autonomi — non serve il runtime .NET.
+
+**winget:**
+
+```
+winget install harungecit.IndepenDesk
+```
+
+**Installer (consigliato):** scarica `IndepenDesk-Setup-<versione>-<arch>.exe` dalle [Releases](https://github.com/harungecit/IndepenDesk/releases) ed eseguilo — con avvio automatico e icona desktop opzionali, in 7 lingue.
+
+**MSI** (distribuzione aziendale / GPO): `IndepenDesk-<versione>-<arch>.msi`.
+
+**Portatile:** `IndepenDesk-v<versione>-win-<arch>.zip` — estrai ed esegui, nessuna installazione.
+
+**MSIX:** firmato con certificato autofirmato — installa prima `IndepenDesk.cer` in *Computer locale → Persone attendibili*, poi fai doppio clic sul `.msix`.
+
+L'app risiede nella barra di sistema (icona con due schermi blu).
 
 ## Scorciatoie
 
@@ -55,14 +69,6 @@ IndepenDesk non usa il sistema globale di Windows. Gestisce insiemi di finestre 
 - Il nativo `Win+Ctrl+←/→` attiva ancora il cambio globale — basta non usarlo.
 - `Ctrl+Alt+←/→` può entrare in conflitto con le scorciatoie Intel "ruota schermo"; disattivale se necessario.
 - Il menu contestuale della barra delle applicazioni di Windows 11 non è estendibile; usa il menu della panoramica.
-
-## Compilazione
-
-```
-dotnet publish -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true -o publish
-```
-
-Richiede l'SDK .NET 8. Le release vengono generate automaticamente da GitHub Actions al push di un tag `v*`.
 
 ## Licenza
 

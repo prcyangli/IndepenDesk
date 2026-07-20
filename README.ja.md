@@ -21,9 +21,23 @@ Windows の仮想デスクトップはグローバルです。`Win+Ctrl+←/→`
 
 ## インストール
 
-1. 未導入なら [.NET 8 デスクトップランタイム](https://dotnet.microsoft.com/download/dotnet/8.0) をインストール。
-2. [Releases](https://github.com/harungecit/IndepenDesk/releases) から `IndepenDesk-vX.Y.Z-win-x64.zip` をダウンロードして展開し、`IndepenDesk.exe` を実行。
-3. アプリはシステムトレイに常駐します。自動起動：`Win+R` → `shell:startup` → ショートカットを配置。
+Windows 10 (1607+) と Windows 11 の **x64、x86、ARM64** に対応。すべてのパッケージは自己完結型で、.NET ランタイムは不要です。
+
+**winget：**
+
+```
+winget install harungecit.IndepenDesk
+```
+
+**インストーラー（推奨）：** [Releases](https://github.com/harungecit/IndepenDesk/releases) から `IndepenDesk-Setup-<バージョン>-<アーキテクチャ>.exe` をダウンロードして実行 — 自動起動とデスクトップアイコンをオプションで選択可能、7 言語対応。
+
+**MSI**（企業 / GPO 展開向け）：`IndepenDesk-<バージョン>-<アーキテクチャ>.msi`。
+
+**ポータブル版：** `IndepenDesk-v<バージョン>-win-<アーキテクチャ>.zip` — 展開して実行するだけ。
+
+**MSIX：** 自己署名証明書で署名 — 先に `IndepenDesk.cer` を*ローカルコンピューター → 信頼されたユーザー*にインストールしてから `.msix` をダブルクリック。
+
+アプリはシステムトレイに常駐します（2 つの青い画面のアイコン）。
 
 ## ショートカット
 
@@ -55,14 +69,6 @@ IndepenDesk は Windows のグローバル仮想デスクトップを使いま�
 - ネイティブの `Win+Ctrl+←/→` は引き続きグローバル切り替えを起動します — 使わなければ問題ありません。
 - `Ctrl+Alt+←/→` は Intel グラフィックスの「画面回転」ホットキーと衝突する場合があります。必要なら Intel 設定で無効化してください。
 - Windows 11 のタスクバーのコンテキストメニューはサードパーティから拡張できません。オーバービューの右クリックメニューをご利用ください。
-
-## ビルド
-
-```
-dotnet publish -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true -o publish
-```
-
-.NET 8 SDK が必要です。`v*` タグを push すると GitHub Actions がリリースを自動ビルドします。
 
 ## ライセンス
 

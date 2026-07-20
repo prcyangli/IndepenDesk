@@ -21,9 +21,23 @@ Virtuelle Desktops unter Windows sind global: `Win+Strg+←/→` wechselt **alle
 
 ## Installation
 
-1. Falls nötig, die [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) installieren.
-2. `IndepenDesk-vX.Y.Z-win-x64.zip` von den [Releases](https://github.com/harungecit/IndepenDesk/releases) herunterladen, entpacken und `IndepenDesk.exe` starten.
-3. Die App sitzt im Infobereich. Autostart: `Win+R` → `shell:startup` → Verknüpfung ablegen.
+Läuft unter Windows 10 (1607+) und Windows 11 auf **x64, x86 und ARM64**. Alle Pakete sind eigenständig — keine .NET-Laufzeit erforderlich.
+
+**winget:**
+
+```
+winget install harungecit.IndepenDesk
+```
+
+**Installer (empfohlen):** `IndepenDesk-Setup-<Version>-<Arch>.exe` von den [Releases](https://github.com/harungecit/IndepenDesk/releases) herunterladen und ausführen — mit optionalem Autostart und Desktop-Symbol, in 7 Sprachen.
+
+**MSI** (Unternehmens-/GPO-Bereitstellung): `IndepenDesk-<Version>-<Arch>.msi`.
+
+**Portabel:** `IndepenDesk-v<Version>-win-<Arch>.zip` — entpacken und starten, keine Installation.
+
+**MSIX:** mit einem selbstsignierten Zertifikat signiert — zuerst `IndepenDesk.cer` unter *Lokaler Computer → Vertrauenswürdige Personen* installieren, dann die `.msix` doppelklicken.
+
+Die App sitzt im Infobereich (Symbol mit zwei blauen Bildschirmen).
 
 ## Tastenkürzel
 
@@ -55,14 +69,6 @@ IndepenDesk nutzt nicht das globale System von Windows. Stattdessen verwaltet es
 - Das native `Win+Strg+←/→` löst weiterhin den globalen Wechsel aus — einfach nicht verwenden.
 - `Strg+Alt+←/→` kann mit Intel-Grafik-Hotkeys („Bildschirm drehen") kollidieren; ggf. in den Intel-Einstellungen deaktivieren.
 - Das Kontextmenü der Windows-11-Taskleiste ist nicht erweiterbar; nutzen Sie das Rechtsklick-Menü der Übersicht.
-
-## Kompilieren
-
-```
-dotnet publish -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true -o publish
-```
-
-Benötigt das .NET 8 SDK. Releases werden bei einem `v*`-Tag automatisch von GitHub Actions gebaut.
 
 ## Lizenz
 

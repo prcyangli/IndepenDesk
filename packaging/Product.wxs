@@ -1,0 +1,41 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="IndepenDesk"
+           Manufacturer="harungecit"
+           Version="$(var.MyVersion)"
+           Language="1033"
+           UpgradeCode="7E4B1D6A-9C2F-4E83-B5A1-2D3C4E5F6071"
+           Scope="perMachine">
+
+    <SummaryInformation Description="Independent virtual desktops per monitor for Windows" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of IndepenDesk is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/harungecit/IndepenDesk" />
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="IndepenDesk">
+        <Component Id="MainExecutable">
+          <File Id="IndepenDeskExe" Source="$(var.ExePath)" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut">
+        <Shortcut Id="AppStartMenuShortcut"
+                  Name="IndepenDesk"
+                  Target="[INSTALLFOLDER]IndepenDesk.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\harungecit\IndepenDesk"
+                       Name="installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="MainFeature">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Package>
+</Wix>
