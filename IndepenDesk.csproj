@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <AssemblyName>IndepenDesk</AssemblyName>
+    <RootNamespace>IndepenDesk</RootNamespace>
+    <Version>0.2.0</Version>
+    <Authors>harungecit</Authors>
+    <RepositoryUrl>https://github.com/harungecit/IndepenDesk</RepositoryUrl>
+    <Description>Independent virtual desktops per monitor for Windows — macOS-style Spaces behavior.</Description>
+  </PropertyGroup>
+
+</Project>
