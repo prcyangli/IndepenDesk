@@ -45,7 +45,7 @@ jobs:
         shell: pwsh
         run: |
           $version = "$env:GITHUB_REF_NAME".TrimStart("v")
-          dotnet tool install --global wix
+          dotnet tool install --global wix --version 5.0.2
           foreach ($arch in "x64","x86","arm64") {
             wix build packaging\Product.wxs -arch $arch `
               -d MyVersion=$version `
