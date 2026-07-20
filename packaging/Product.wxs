@@ -1,4 +1,5 @@
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="IndepenDesk"
            Manufacturer="harungecit"
            Version="$(var.MyVersion)"
@@ -9,6 +10,9 @@
     <SummaryInformation Description="Independent virtual desktops per monitor for Windows" />
     <MajorUpgrade DowngradeErrorMessage="A newer version of IndepenDesk is already installed." />
     <MediaTemplate EmbedCab="yes" />
+
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
 
     <Icon Id="AppIcon" SourceFile="$(var.IconPath)" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
