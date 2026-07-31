@@ -17,6 +17,7 @@ Windows の仮想デスクトップはグローバルです。`Win+Ctrl+←/→`
 - 🗂 **オーバービュー** (`Ctrl+Alt+↑`) — Mission Control 風のグリッドでドラッグ＆ドロップ：ウィンドウをデスクトップ間・モニター間で移動、デスクトップごと別モニターへ移動、右クリック移動メニュー。
 - 🌍 **8 言語対応** — 自動検出、トレイメニューから変更可能。
 - 🔄 GitHub Releases 経由の**更新チェック**。
+- 🚀 **既定で Windows と同時に起動** — トレイメニューからいつでも無効にできます。
 - 🛟 **クラッシュ耐性** — 非表示にしたウィンドウはディスクに記録され、次回起動時に復元されます。
 
 ## インストール
@@ -29,7 +30,7 @@ Windows 10 (1607+) と Windows 11 の **x64、x86、ARM64** に対応。すべ�
 winget install harungecit.IndepenDesk
 ```
 
-**インストーラー（推奨）：** [Releases](https://github.com/harungecit/IndepenDesk/releases) から `IndepenDesk-Setup-<バージョン>-<アーキテクチャ>.exe` をダウンロードして実行 — 自動起動とデスクトップアイコンをオプションで選択可能、7 言語対応。
+**インストーラー（推奨）：** [Releases](https://github.com/harungecit/IndepenDesk/releases) から `IndepenDesk-Setup-<バージョン>-<アーキテクチャ>.exe` をダウンロードして実行 — デスクトップアイコンをオプションで選択可能、7 言語対応。
 
 **MSI**（企業 / GPO 展開向け）：`IndepenDesk-<バージョン>-<アーキテクチャ>.msi`。
 

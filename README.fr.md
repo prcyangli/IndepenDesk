@@ -17,6 +17,7 @@ Les bureaux virtuels de Windows sont globaux : `Win+Ctrl+←/→` change **tous 
 - 🗂 **Vue d'ensemble** (`Ctrl+Alt+↑`) — grille façon Mission Control avec glisser-déposer : déplacez les fenêtres entre bureaux et moniteurs, déplacez un bureau entier vers un autre moniteur, menu contextuel de déplacement.
 - 🌍 **8 langues** — détection automatique, modifiable depuis le menu de la zone de notification.
 - 🔄 **Vérification des mises à jour** via GitHub Releases.
+- 🚀 **Démarre avec Windows** par défaut — désactivable à tout moment depuis le menu de la zone de notification.
 - 🛟 **Résistant aux plantages** — les fenêtres masquées sont journalisées sur disque et restaurées au démarrage suivant.
 
 ## Installation
@@ -29,7 +30,7 @@ Fonctionne sous Windows 10 (1607+) et Windows 11 sur **x64, x86 et ARM64**. Tous
 winget install harungecit.IndepenDesk
 ```
 
-**Installateur (recommandé) :** téléchargez `IndepenDesk-Setup-<version>-<arch>.exe` depuis les [Releases](https://github.com/harungecit/IndepenDesk/releases) et exécutez-le — démarrage automatique et icône de bureau en option, 7 langues d'installation.
+**Installateur (recommandé) :** téléchargez `IndepenDesk-Setup-<version>-<arch>.exe` depuis les [Releases](https://github.com/harungecit/IndepenDesk/releases) et exécutez-le — icône de bureau en option, 7 langues d'installation.
 
 **MSI** (déploiement d'entreprise / GPO) : `IndepenDesk-<version>-<arch>.msi`.
 

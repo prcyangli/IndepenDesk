@@ -42,7 +42,6 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 
 [Tasks]
-Name: "startup"; Description: "{cm:AutoStartProgram,IndepenDesk}"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; Flags: unchecked
 
 [Files]
@@ -51,7 +50,15 @@ Source: "..\publish\{#Arch}\IndepenDesk.exe"; DestDir: "{app}"; Flags: ignorever
 [Icons]
 Name: "{autoprograms}\IndepenDesk"; Filename: "{app}\IndepenDesk.exe"
 Name: "{autodesktop}\IndepenDesk"; Filename: "{app}\IndepenDesk.exe"; Tasks: desktopicon
-Name: "{autostartup}\IndepenDesk"; Filename: "{app}\IndepenDesk.exe"; Tasks: startup
+
+; Başlangıç, kısayol yerine uygulamanın da yönettiği HKCU Run değeriyle sağlanır
+; (varsayılan açık; tepsi menüsünden kapatılabilir; kaldırırken temizlenir).
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "IndepenDesk"; ValueData: """{app}\IndepenDesk.exe"""; Flags: uninsdeletevalue
+
+; 0.3.x'in Başlangıç klasörü kısayolu kaldırılır (Run değeriyle çift başlatmayı önler)
+[InstallDelete]
+Type: files; Name: "{autostartup}\IndepenDesk.lnk"
 
 [Run]
 Filename: "{app}\IndepenDesk.exe"; Description: "{cm:LaunchProgram,IndepenDesk}"; Flags: nowait postinstall skipifsilent

@@ -17,6 +17,7 @@ Windows'un sanal masaüstleri globaldir: `Win+Ctrl+←/→` **tüm monitörleri 
 - 🗂 **Genel Bakış** (`Ctrl+Alt+↑`) — Mission Control benzeri ekran, sürükle-bırak: pencereleri masaüstleri ve monitörler arasında taşıyın, masaüstünü komple başka monitöre taşıyın, sağ tık taşıma menüsü.
 - 🌍 **8 dil** — English, Türkçe, Deutsch, Français, Italiano, Русский, 中文, 日本語 (otomatik algılanır, tray menüsünden değiştirilebilir).
 - 🔄 **Güncelleme denetimi** — tray menüsünden, GitHub Releases üzerinden.
+- 🚀 **Windows ile birlikte başlar** (varsayılan) — tray menüsünden istediğiniz an kapatılabilir.
 - 🛟 **Çökmeye dayanıklı** — gizlenen pencereler diske kaydedilir ve sonraki açılışta kurtarılır; çıkışta ve monitör çıkarıldığında her şey geri gelir.
 
 ## Kurulum
@@ -29,7 +30,7 @@ Windows 10 (1607+) ve Windows 11'de **x64, x86 ve ARM64** üzerinde çalışır.
 winget install harungecit.IndepenDesk
 ```
 
-**Kurulum sihirbazı (önerilen):** [Releases](https://github.com/harungecit/IndepenDesk/releases) sayfasından `IndepenDesk-Setup-<sürüm>-<mimari>.exe` indirip çalıştırın — isteğe bağlı otomatik başlatma ve masaüstü simgesi, 7 kurulum dili.
+**Kurulum sihirbazı (önerilen):** [Releases](https://github.com/harungecit/IndepenDesk/releases) sayfasından `IndepenDesk-Setup-<sürüm>-<mimari>.exe` indirip çalıştırın — isteğe bağlı masaüstü simgesi, 7 kurulum dili.
 
 **MSI** (kurumsal / GPO dağıtımı): `IndepenDesk-<sürüm>-<mimari>.msi`.
 

@@ -17,6 +17,7 @@ Virtuelle Desktops unter Windows sind global: `Win+Strg+←/→` wechselt **alle
 - 🗂 **Übersicht** (`Strg+Alt+↑`) — Mission-Control-ähnliche Ansicht mit Drag & Drop: Fenster zwischen Desktops und Monitoren verschieben, ganze Desktops auf einen anderen Monitor ziehen, Rechtsklick-Menü.
 - 🌍 **8 Sprachen** — automatisch erkannt, über das Tray-Menü änderbar.
 - 🔄 **Update-Prüfung** über GitHub Releases im Tray-Menü.
+- 🚀 **Startet standardmäßig mit Windows** — jederzeit im Tray-Menü abschaltbar.
 - 🛟 **Absturzsicher** — versteckte Fenster werden protokolliert und beim nächsten Start wiederhergestellt.
 
 ## Installation
@@ -29,7 +30,7 @@ Läuft unter Windows 10 (1607+) und Windows 11 auf **x64, x86 und ARM64**. Alle 
 winget install harungecit.IndepenDesk
 ```
 
-**Installer (empfohlen):** `IndepenDesk-Setup-<Version>-<Arch>.exe` von den [Releases](https://github.com/harungecit/IndepenDesk/releases) herunterladen und ausführen — mit optionalem Autostart und Desktop-Symbol, in 7 Sprachen.
+**Installer (empfohlen):** `IndepenDesk-Setup-<Version>-<Arch>.exe` von den [Releases](https://github.com/harungecit/IndepenDesk/releases) herunterladen und ausführen — mit optionalem Desktop-Symbol, in 7 Sprachen.
 
 **MSI** (Unternehmens-/GPO-Bereitstellung): `IndepenDesk-<Version>-<Arch>.msi`.
 

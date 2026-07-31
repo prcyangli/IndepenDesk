@@ -20,6 +20,7 @@ internal sealed class TrayApp : ApplicationContext
     public TrayApp()
     {
         _hotkeys = new HotkeyWindow(OnHotkey);
+        StartupManager.ApplyOnLaunch();
 
         _tray = new NotifyIcon
         {
@@ -77,6 +78,20 @@ internal sealed class TrayApp : ApplicationContext
             langMenu.DropDownItems.Add(item);
         }
         menu.Items.Add(langMenu);
+
+        // MSIX'te başlangıç Windows Ayarları'ndan yönetilir; menü öğesi o sayfayı açar.
+        var startupItem = new ToolStripMenuItem(L.T("menu.startup"));
+        if (StartupManager.IsPackaged)
+        {
+            startupItem.Click += (_, _) => StartupManager.OpenWindowsStartupSettings();
+        }
+        else
+        {
+            startupItem.Checked = StartupManager.Enabled;
+            startupItem.CheckOnClick = true;
+            startupItem.CheckedChanged += (_, _) => StartupManager.SetEnabled(startupItem.Checked);
+        }
+        menu.Items.Add(startupItem);
 
         menu.Items.Add(L.T("menu.update"), null, async (_, _) =>
             await UpdateChecker.CheckAndNotifyAsync(new WindowWrapper(_hotkeys.Handle)));

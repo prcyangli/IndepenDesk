@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text.Json;
 
 namespace IndepenDesk;
 
@@ -15,37 +14,20 @@ internal static class L
         ("it", "Italiano"), ("ru", "Русский"), ("zh", "中文"), ("ja", "日本語")
     };
 
-    private static readonly string SettingsFile = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "IndepenDesk", "settings.json");
-
     /// <summary>"auto" veya dil kodu.</summary>
     public static string Override { get; private set; } = "auto";
     private static Dictionary<string, string> _t = null!;
 
     static L()
     {
-        try
-        {
-            if (File.Exists(SettingsFile))
-            {
-                var doc = JsonDocument.Parse(File.ReadAllText(SettingsFile));
-                if (doc.RootElement.TryGetProperty("language", out var lang))
-                    Override = lang.GetString() ?? "auto";
-            }
-        }
-        catch { }
+        Override = SettingsStore.GetString("language") ?? "auto";
         Apply();
     }
 
     public static void SetOverride(string codeOrAuto)
     {
         Override = codeOrAuto;
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(SettingsFile)!);
-            File.WriteAllText(SettingsFile, JsonSerializer.Serialize(new { language = Override }));
-        }
-        catch { }
+        SettingsStore.SetString("language", Override);
         Apply();
     }
 
@@ -72,6 +54,7 @@ internal static class L
             ["menu.help"] = "How to use…",
             ["menu.language"] = "Language",
             ["menu.lang.auto"] = "System (auto)",
+            ["menu.startup"] = "Start with Windows",
             ["menu.update"] = "Check for updates…",
             ["menu.exit"] = "Exit",
             ["msg.hotkeyFail"] = "Some shortcuts could not be registered (another app may be using them): ",
@@ -114,6 +97,7 @@ internal static class L
             ["menu.help"] = "Nasıl kullanılır…",
             ["menu.language"] = "Dil",
             ["menu.lang.auto"] = "Sistem (otomatik)",
+            ["menu.startup"] = "Windows ile başlat",
             ["menu.update"] = "Güncellemeleri denetle…",
             ["menu.exit"] = "Çıkış",
             ["msg.hotkeyFail"] = "Bazı kısayollar kaydedilemedi (başka bir uygulama kullanıyor olabilir): ",
@@ -156,6 +140,7 @@ internal static class L
             ["menu.help"] = "Bedienungsanleitung…",
             ["menu.language"] = "Sprache",
             ["menu.lang.auto"] = "System (automatisch)",
+            ["menu.startup"] = "Mit Windows starten",
             ["menu.update"] = "Nach Updates suchen…",
             ["menu.exit"] = "Beenden",
             ["msg.hotkeyFail"] = "Einige Tastenkürzel konnten nicht registriert werden (evtl. von einer anderen App belegt): ",
@@ -198,6 +183,7 @@ internal static class L
             ["menu.help"] = "Mode d'emploi…",
             ["menu.language"] = "Langue",
             ["menu.lang.auto"] = "Système (auto)",
+            ["menu.startup"] = "Lancer au démarrage de Windows",
             ["menu.update"] = "Rechercher des mises à jour…",
             ["menu.exit"] = "Quitter",
             ["msg.hotkeyFail"] = "Certains raccourcis n'ont pas pu être enregistrés (peut-être utilisés par une autre application) : ",
@@ -240,6 +226,7 @@ internal static class L
             ["menu.help"] = "Come si usa…",
             ["menu.language"] = "Lingua",
             ["menu.lang.auto"] = "Sistema (auto)",
+            ["menu.startup"] = "Avvia con Windows",
             ["menu.update"] = "Controlla aggiornamenti…",
             ["menu.exit"] = "Esci",
             ["msg.hotkeyFail"] = "Alcune scorciatoie non sono state registrate (forse usate da un'altra app): ",
@@ -282,6 +269,7 @@ internal static class L
             ["menu.help"] = "Как пользоваться…",
             ["menu.language"] = "Язык",
             ["menu.lang.auto"] = "Системный (авто)",
+            ["menu.startup"] = "Запускать вместе с Windows",
             ["menu.update"] = "Проверить обновления…",
             ["menu.exit"] = "Выход",
             ["msg.hotkeyFail"] = "Не удалось зарегистрировать некоторые сочетания клавиш (возможно, заняты другим приложением): ",
@@ -324,6 +312,7 @@ internal static class L
             ["menu.help"] = "使用说明…",
             ["menu.language"] = "语言",
             ["menu.lang.auto"] = "系统（自动）",
+            ["menu.startup"] = "开机自动启动",
             ["menu.update"] = "检查更新…",
             ["menu.exit"] = "退出",
             ["msg.hotkeyFail"] = "部分快捷键注册失败（可能被其他应用占用）：",
@@ -366,6 +355,7 @@ internal static class L
             ["menu.help"] = "使い方…",
             ["menu.language"] = "言語",
             ["menu.lang.auto"] = "システム（自動）",
+            ["menu.startup"] = "Windows 起動時に実行",
             ["menu.update"] = "更新を確認…",
             ["menu.exit"] = "終了",
             ["msg.hotkeyFail"] = "一部のショートカットを登録できませんでした（他のアプリが使用中の可能性）：",

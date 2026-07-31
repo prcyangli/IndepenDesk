@@ -35,11 +35,18 @@
         <RegistryValue Root="HKCU" Key="Software\harungecit\IndepenDesk"
                        Name="installed" Type="integer" Value="1" KeyPath="yes" />
       </Component>
+      <!-- Başlangıç: uygulamanın da yönettiği HKCU Run değeri (kaldırırken silinir) -->
+      <Component Id="StartupRegistryValue">
+        <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                       Name="IndepenDesk" Type="string"
+                       Value="&quot;[INSTALLFOLDER]IndepenDesk.exe&quot;" KeyPath="yes" />
+      </Component>
     </StandardDirectory>
 
     <Feature Id="MainFeature">
       <ComponentRef Id="MainExecutable" />
       <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="StartupRegistryValue" />
     </Feature>
   </Package>
 </Wix>

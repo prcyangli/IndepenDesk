@@ -17,6 +17,7 @@ Windows virtual desktops are global: pressing `Win+Ctrl+←/→` switches **all 
 - 🗂 **Overview screen** (`Ctrl+Alt+↑`) — Mission Control-like grid with drag & drop: move windows between desktops and monitors, move whole desktops to another monitor, right-click move menu.
 - 🌍 **8 languages** — English, Türkçe, Deutsch, Français, Italiano, Русский, 中文, 日本語 (auto-detected, changeable from the tray menu).
 - 🔄 **Update check** from the tray menu via GitHub Releases.
+- 🚀 **Starts with Windows** by default — can be turned off anytime from the tray menu.
 - 🛟 **Crash-safe** — hidden windows are journaled to disk and restored on the next start; everything is restored on exit and when a monitor is unplugged.
 
 ## Installation
@@ -29,7 +30,7 @@ Works on Windows 10 (1607+) and Windows 11 on **x64, x86 and ARM64**. All packag
 winget install harungecit.IndepenDesk
 ```
 
-**Installer (recommended):** download `IndepenDesk-Setup-<version>-<arch>.exe` from [Releases](https://github.com/harungecit/IndepenDesk/releases) and run it — with optional autostart and desktop icon, in 7 setup languages.
+**Installer (recommended):** download `IndepenDesk-Setup-<version>-<arch>.exe` from [Releases](https://github.com/harungecit/IndepenDesk/releases) and run it — with optional desktop icon, in 7 setup languages.
 
 **MSI** (corporate / GPO deployment): `IndepenDesk-<version>-<arch>.msi`.
 

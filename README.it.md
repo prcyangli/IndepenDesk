@@ -17,6 +17,7 @@ I desktop virtuali di Windows sono globali: `Win+Ctrl+←/→` cambia **tutti i 
 - 🗂 **Panoramica** (`Ctrl+Alt+↑`) — griglia in stile Mission Control con trascinamento: sposta le finestre tra desktop e monitor, sposta interi desktop su un altro monitor, menu contestuale di spostamento.
 - 🌍 **8 lingue** — rilevate automaticamente, modificabili dal menu nella barra di sistema.
 - 🔄 **Controllo aggiornamenti** tramite GitHub Releases.
+- 🚀 **Si avvia con Windows** per impostazione predefinita — disattivabile in qualsiasi momento dal menu nella barra di sistema.
 - 🛟 **A prova di crash** — le finestre nascoste vengono registrate su disco e ripristinate al riavvio.
 
 ## Installazione
@@ -29,7 +30,7 @@ Funziona su Windows 10 (1607+) e Windows 11 su **x64, x86 e ARM64**. Tutti i pac
 winget install harungecit.IndepenDesk
 ```
 
-**Installer (consigliato):** scarica `IndepenDesk-Setup-<versione>-<arch>.exe` dalle [Releases](https://github.com/harungecit/IndepenDesk/releases) ed eseguilo — con avvio automatico e icona desktop opzionali, in 7 lingue.
+**Installer (consigliato):** scarica `IndepenDesk-Setup-<versione>-<arch>.exe` dalle [Releases](https://github.com/harungecit/IndepenDesk/releases) ed eseguilo — con icona desktop opzionale, in 7 lingue.
 
 **MSI** (distribuzione aziendale / GPO): `IndepenDesk-<versione>-<arch>.msi`.
 

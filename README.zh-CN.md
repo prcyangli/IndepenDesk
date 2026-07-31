@@ -17,6 +17,7 @@ Windows 的虚拟桌面是全局的：按 `Win+Ctrl+←/→` 会**同时切换�
 - 🗂 **总览** (`Ctrl+Alt+↑`) — 类似 Mission Control 的网格视图，支持拖放：在桌面和显示器之间移动窗口，将整个桌面移到另一台显示器，右键移动菜单。
 - 🌍 **8 种语言** — 自动检测，可在托盘菜单中更改。
 - 🔄 通过 GitHub Releases **检查更新**。
+- 🚀 **默认开机自动启动** — 可随时在托盘菜单中关闭。
 - 🛟 **防崩溃** — 隐藏的窗口会记录到磁盘，下次启动时自动恢复。
 
 ## 安装
@@ -29,7 +30,7 @@ Windows 的虚拟桌面是全局的：按 `Win+Ctrl+←/→` 会**同时切换�
 winget install harungecit.IndepenDesk
 ```
 
-**安装程序（推荐）：** 从 [Releases](https://github.com/harungecit/IndepenDesk/releases) 下载 `IndepenDesk-Setup-<版本>-<架构>.exe` 并运行 — 可选开机自启和桌面图标，提供 7 种安装语言。
+**安装程序（推荐）：** 从 [Releases](https://github.com/harungecit/IndepenDesk/releases) 下载 `IndepenDesk-Setup-<版本>-<架构>.exe` 并运行 — 可选桌面图标，提供 7 种安装语言。
 
 **MSI**（企业 / GPO 部署）：`IndepenDesk-<版本>-<架构>.msi`。
 
