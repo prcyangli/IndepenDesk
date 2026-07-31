@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>independesk</id>
+    <version>0.4.0</version>
+    <packageSourceUrl>https://github.com/harungecit/IndepenDesk/tree/main/packaging/choco</packageSourceUrl>
+    <owners>harungecit</owners>
+    <title>IndepenDesk</title>
+    <authors>harungecit</authors>
+    <projectUrl>https://github.com/harungecit/IndepenDesk</projectUrl>
+    <licenseUrl>https://github.com/harungecit/IndepenDesk/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <projectSourceUrl>https://github.com/harungecit/IndepenDesk</projectSourceUrl>
+    <bugTrackerUrl>https://github.com/harungecit/IndepenDesk/issues</bugTrackerUrl>
+    <tags>independesk virtual-desktop multi-monitor desktop productivity workspace</tags>
+    <summary>Independent virtual desktops per monitor for Windows</summary>
+    <description>
+IndepenDesk brings macOS-style "Displays have separate Spaces" behavior to Windows: every monitor gets its own set of virtual desktops, and switching only affects the monitor under the mouse cursor.
+
+## Features
+
+- Per-monitor desktops with independent, dynamic desktop counts (up to 9 per monitor)
+- Global desktop numbering with `Ctrl+Alt+1..9` jumps
+- macOS-style slide animation, clipped inside the monitor
+- Mission Control-like overview (`Ctrl+Alt+Up`) with drag and drop
+- 8 UI languages, auto-detected
+- Starts with Windows by default — can be turned off from the tray menu
+- Crash-safe: hidden windows are journaled and restored on the next start
+    </description>
+    <releaseNotes>https://github.com/harungecit/IndepenDesk/releases/tag/v0.4.0</releaseNotes>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>
