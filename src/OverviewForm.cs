@@ -25,6 +25,12 @@ internal sealed class OverviewForm : Form
     private static readonly Color ChipHover = Color.FromArgb(72, 72, 84);
     private static readonly Color ChipBorder = Color.FromArgb(80, 80, 94);
     private static readonly Color TextDim = Color.FromArgb(150, 150, 162);
+    private static readonly Size DesktopCardSize = new(384, 280);
+    private const int AddCardWidth = 92;
+    private const int WindowChipSpacing = 6;
+
+    private readonly int _windowChipHeight;
+    private bool _keepOpenOnDeactivate;
 
     private sealed record WindowDrag(IntPtr Handle);
     private sealed record DesktopDrag(string Device, int LocalIndex);
@@ -56,15 +62,24 @@ internal sealed class OverviewForm : Form
         Bounds = new Rectangle(b.Left + b.Width / 12, b.Top + b.Height / 12,
                                b.Width * 10 / 12, b.Height * 10 / 12);
 
+        using (var graphics = CreateGraphics())
+        using (var windowFont = UiFont(10.8f))
+            _windowChipHeight = Math.Max(38, (int)Math.Ceiling(windowFont.GetHeight(graphics)) + 10);
+
         KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) Close(); };
-        Deactivate += (_, _) => Close();
+        Deactivate += (_, _) =>
+        {
+            if (!_keepOpenOnDeactivate)
+                Close();
+        };
 
         BuildUi();
     }
 
     private void BuildUi()
     {
-        Controls.Clear();
+        foreach (Control control in Controls.Cast<Control>().ToArray())
+            control.Dispose();
 
         var root = new FlowLayoutPanel
         {
@@ -76,11 +91,49 @@ internal sealed class OverviewForm : Form
         };
         Controls.Add(root);
 
+        var closeButton = new Button
+        {
+            Text = string.Empty,
+            ForeColor = Color.White,
+            BackColor = CardBg,
+            FlatStyle = FlatStyle.Flat,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Size = new Size(72, 60),
+            Location = new Point(ClientSize.Width - 86, 12),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            Cursor = Cursors.Hand,
+            TabStop = false,
+            AccessibleName = L.T("help.close"),
+            UseVisualStyleBackColor = false
+        };
+        closeButton.FlatAppearance.BorderSize = 1;
+        closeButton.FlatAppearance.BorderColor = CardBorder;
+        closeButton.FlatAppearance.MouseOverBackColor = ChipHover;
+        closeButton.FlatAppearance.MouseDownBackColor = ChipBg;
+        closeButton.Paint += (_, e) =>
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            float inset = Math.Min(closeButton.ClientSize.Width, closeButton.ClientSize.Height) * 0.3f;
+            float right = closeButton.ClientSize.Width - inset;
+            float bottom = closeButton.ClientSize.Height - inset;
+            using var pen = new Pen(Color.White, Math.Max(2.5f, closeButton.DeviceDpi / 48f))
+            {
+                StartCap = LineCap.Round,
+                EndCap = LineCap.Round
+            };
+            e.Graphics.DrawLine(pen, inset, inset, right, bottom);
+            e.Graphics.DrawLine(pen, right, inset, inset, bottom);
+        };
+        closeButton.Click += (_, _) => Close();
+        _tips.SetToolTip(closeButton, L.T("help.close"));
+        Controls.Add(closeButton);
+        closeButton.BringToFront();
+
         root.Controls.Add(new Label
         {
             Text = L.T("ov.title"),
             ForeColor = Color.White,
-            Font = new Font("Segoe UI", 15f, FontStyle.Bold),
+            Font = UiFont(15f, FontStyle.Bold),
             AutoSize = true,
             Margin = new Padding(4, 0, 0, 2)
         });
@@ -88,7 +141,7 @@ internal sealed class OverviewForm : Form
         {
             Text = L.T("ov.legend"),
             ForeColor = TextDim,
-            Font = new Font("Segoe UI", 9.5f),
+            Font = UiFont(9.5f),
             AutoSize = true,
             Margin = new Padding(4, 0, 0, 14)
         });
@@ -99,7 +152,7 @@ internal sealed class OverviewForm : Form
             {
                 Text = "🖥  " + L.F("ov.monitor", mon.Ordinal),
                 ForeColor = Color.White,
-                Font = new Font("Segoe UI", 12.5f, FontStyle.Bold),
+                Font = UiFont(12.5f, FontStyle.Bold),
                 AutoSize = true,
                 Margin = new Padding(4, 10, 0, 4)
             });
@@ -129,7 +182,8 @@ internal sealed class OverviewForm : Form
             };
             row.DragEnter += (_, e) =>
             {
-                if (e.Data?.GetData(typeof(DesktopDrag)) is DesktopDrag d && d.Device != mon.Device)
+                if (e.Data?.GetData(typeof(DesktopDrag)) is DesktopDrag d &&
+                    (d.Device == mon.Device || mon.Desktops.Count < DesktopManager.MaxDesktopsPerMonitor))
                 {
                     e.Effect = DragDropEffects.Move;
                     rowHover = true;
@@ -140,11 +194,9 @@ internal sealed class OverviewForm : Form
             row.DragDrop += (_, e) =>
             {
                 rowHover = false;
-                if (e.Data?.GetData(typeof(DesktopDrag)) is DesktopDrag d && d.Device != mon.Device)
-                {
-                    _mgr.MoveDesktopToMonitor(d.Device, d.LocalIndex, mon.Device);
-                    BuildUi();
-                }
+                if (e.Data?.GetData(typeof(DesktopDrag)) is DesktopDrag d)
+                    RunAndRefreshOverview(() =>
+                        _mgr.MoveDesktop(d.Device, d.LocalIndex, mon.Device, int.MaxValue));
             };
             root.Controls.Add(row);
 
@@ -162,7 +214,7 @@ internal sealed class OverviewForm : Form
     {
         var card = new BufferedPanel
         {
-            Size = new Size(276, 216),
+            Size = DesktopCardSize,
             BackColor = CardBg,
             Margin = new Padding(7),
             AllowDrop = true,
@@ -170,6 +222,8 @@ internal sealed class OverviewForm : Form
         };
 
         bool dropHover = false;
+        bool desktopDropHover = false;
+        bool insertAfter = false;
         card.Paint += (_, e) =>
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
@@ -178,9 +232,15 @@ internal sealed class OverviewForm : Form
             using var path = RoundedRect(new Rectangle(1, 1, card.Width - 3, card.Height - 3), 10);
             e.Graphics.DrawPath(pen, path);
 
-            if (dropHover)
+            if (dropHover && desktopDropHover)
             {
-                using var hint = new Font("Segoe UI", 10f, FontStyle.Bold);
+                int x = insertAfter ? card.Width - 5 : 4;
+                using var insertPen = new Pen(DropAccent, 4);
+                e.Graphics.DrawLine(insertPen, x, 8, x, card.Height - 8);
+            }
+            else if (dropHover)
+            {
+                using var hint = UiFont(11f, FontStyle.Bold);
                 using var brush = new SolidBrush(DropAccent);
                 var sf = new StringFormat { Alignment = StringAlignment.Center };
                 e.Graphics.DrawString(L.T("ov.drop"), hint, brush,
@@ -193,8 +253,8 @@ internal sealed class OverviewForm : Form
         {
             Text = L.F("ov.desktop", desk.GlobalNumber),
             ForeColor = Color.White,
-            Font = new Font("Segoe UI", 11f, FontStyle.Bold),
-            Location = new Point(10, 9),
+            Font = UiFont(12.5f, FontStyle.Bold),
+            Location = new Point(12, 10),
             AutoSize = true,
             Cursor = Cursors.SizeAll,
             BackColor = Color.Transparent
@@ -214,79 +274,129 @@ internal sealed class OverviewForm : Form
                 Text = L.T("ov.active"),
                 ForeColor = Color.White,
                 BackColor = Accent,
-                Font = new Font("Segoe UI", 8f, FontStyle.Bold),
+                Font = UiFont(9.5f, FontStyle.Bold),
                 TextAlign = ContentAlignment.MiddleCenter,
                 AutoSize = true,
                 Padding = new Padding(5, 2, 5, 2)
             };
             card.Controls.Add(badge);
-            badge.Location = new Point(card.Width - badge.PreferredSize.Width - 12, 10);
+            badge.Location = new Point(card.Width - badge.PreferredSize.Width - 14, 11);
         }
 
-        int y = 40;
-        const int chipH = 30;
-        int maxRows = (216 - 48) / (chipH + 4);
-        foreach (var (win, i) in desk.Windows.Select((w, i) => (w, i)))
+        int windowListTop = Math.Max(48, headerLbl.Top + headerLbl.PreferredHeight + 8);
+        var windowList = new FlowLayoutPanel
         {
-            if (i >= maxRows - 1 && desk.Windows.Count > maxRows)
-            {
-                card.Controls.Add(new Label
-                {
-                    Text = L.F("ov.more", desk.Windows.Count - i),
-                    ForeColor = TextDim,
-                    Location = new Point(12, y + 4),
-                    AutoSize = true,
-                    BackColor = Color.Transparent
-                });
-                break;
-            }
-            card.Controls.Add(BuildWindowChip(win, new Point(10, y)));
-            y += chipH + 4;
+            Location = new Point(12, windowListTop),
+            Size = new Size(card.Width - 24, card.Height - windowListTop - 12),
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            AutoScroll = true,
+            AllowDrop = true,
+            BackColor = Color.Transparent,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+        card.Controls.Add(windowList);
+
+        int contentHeight = desk.Windows.Count * (_windowChipHeight + WindowChipSpacing);
+        bool needsVerticalScroll = contentHeight > windowList.ClientSize.Height;
+        int scrollbarWidth = needsVerticalScroll ? SystemInformation.VerticalScrollBarWidth : 0;
+        int chipWidth = windowList.ClientSize.Width - scrollbarWidth - 2;
+        foreach (var win in desk.Windows)
+        {
+            var chip = BuildWindowChip(win, Point.Empty, chipWidth);
+            chip.Margin = new Padding(0, 0, 0, WindowChipSpacing);
+            windowList.Controls.Add(chip);
         }
 
         if (desk.Windows.Count == 0)
-            card.Controls.Add(new Label
+            windowList.Controls.Add(new Label
             {
                 Text = L.T("ov.empty"),
                 ForeColor = TextDim,
-                Font = new Font("Segoe UI", 9f, FontStyle.Italic),
-                Location = new Point(12, y + 4),
+                Font = UiFont(10.5f, FontStyle.Italic),
                 AutoSize = true,
                 BackColor = Color.Transparent
             });
 
-        card.Click += (_, _) => { _mgr.SwitchTo(mon.Device, desk.LocalIndex); Close(); };
+        card.Click += (_, _) => RunAndRefreshOverview(() => _mgr.SwitchTo(mon.Device, desk.LocalIndex));
 
-        card.DragEnter += (_, e) =>
+        void OnDragEnter(object? sender, DragEventArgs e)
         {
             if (e.Data?.GetData(typeof(WindowDrag)) is WindowDrag)
             {
                 e.Effect = DragDropEffects.Move;
                 dropHover = true;
+                desktopDropHover = false;
                 card.Invalidate();
             }
-        };
-        card.DragLeave += (_, _) => { dropHover = false; card.Invalidate(); };
-        card.DragDrop += (_, e) =>
+            else if (e.Data?.GetData(typeof(DesktopDrag)) is DesktopDrag d &&
+                     (d.Device == mon.Device || mon.Desktops.Count < DesktopManager.MaxDesktopsPerMonitor))
+            {
+                e.Effect = DragDropEffects.Move;
+                dropHover = true;
+                desktopDropHover = true;
+                UpdateInsertSide(e);
+                card.Invalidate();
+            }
+        }
+        void OnDragOver(object? sender, DragEventArgs e)
+        {
+            if (desktopDropHover && e.Data?.GetData(typeof(DesktopDrag)) is DesktopDrag)
+            {
+                e.Effect = DragDropEffects.Move;
+                UpdateInsertSide(e);
+            }
+        }
+        void UpdateInsertSide(DragEventArgs e)
+        {
+            bool next = card.PointToClient(new Point(e.X, e.Y)).X >= card.ClientSize.Width / 2;
+            if (next == insertAfter) return;
+            insertAfter = next;
+            card.Invalidate();
+        }
+        void OnDragLeave(object? sender, EventArgs e)
         {
             dropHover = false;
+            desktopDropHover = false;
+            card.Invalidate();
+        }
+        void OnDragDrop(object? sender, DragEventArgs e)
+        {
+            dropHover = false;
+            desktopDropHover = false;
             if (e.Data?.GetData(typeof(WindowDrag)) is WindowDrag w)
             {
-                _mgr.MoveWindowToDesktop(w.Handle, mon.Device, desk.LocalIndex);
-                BuildUi();
+                RunAndRefreshOverview(() =>
+                    _mgr.MoveWindowToDesktop(w.Handle, mon.Device, desk.LocalIndex));
             }
-        };
+            else if (e.Data?.GetData(typeof(DesktopDrag)) is DesktopDrag d)
+            {
+                int targetIndex = desk.LocalIndex + (insertAfter ? 1 : 0);
+                RunAndRefreshOverview(() =>
+                    _mgr.MoveDesktop(d.Device, d.LocalIndex, mon.Device, targetIndex));
+            }
+        }
+
+        card.DragEnter += OnDragEnter;
+        card.DragOver += OnDragOver;
+        card.DragLeave += OnDragLeave;
+        card.DragDrop += OnDragDrop;
+        windowList.DragEnter += OnDragEnter;
+        windowList.DragOver += OnDragOver;
+        windowList.DragLeave += OnDragLeave;
+        windowList.DragDrop += OnDragDrop;
         return card;
     }
 
     // ---------- pencere kutucuğu ----------
 
-    private Control BuildWindowChip(WindowEntry win, Point location)
+    private Control BuildWindowChip(WindowEntry win, Point location, int width = 316)
     {
         var chip = new BufferedPanel
         {
             Location = location,
-            Size = new Size(256, 30),
+            Size = new Size(width, _windowChipHeight),
             BackColor = ChipBg,
             Cursor = Cursors.SizeAll
         };
@@ -302,44 +412,54 @@ internal sealed class OverviewForm : Form
         {
             Text = "⠿",
             ForeColor = TextDim,
-            Font = new Font("Segoe UI", 11f),
-            Location = new Point(7, 6),
-            AutoSize = true,
+            Font = new Font("Segoe UI", 12.5f),
+            Location = new Point(6, 0),
+            Size = new Size(24, _windowChipHeight),
+            TextAlign = ContentAlignment.MiddleCenter,
+            AutoSize = false,
             BackColor = Color.Transparent,
             Cursor = Cursors.SizeAll
         };
         chip.Controls.Add(grip);
 
-        int textX = 26;
-        var icon = Native.GetWindowSmallIcon(win.Handle);
+        int textX = 36;
+        PictureBox? iconBox = null;
+        using var icon = Native.GetWindowSmallIcon(win.Handle);
         if (icon != null)
         {
-            chip.Controls.Add(new PictureBox
+            var iconImage = icon.ToBitmap();
+            int iconSize = Math.Min(24, _windowChipHeight - 12);
+            iconBox = new PictureBox
             {
-                Image = icon.ToBitmap(),
-                Size = new Size(16, 16),
-                Location = new Point(26, 7),
-                SizeMode = PictureBoxSizeMode.StretchImage,
+                Image = iconImage,
+                Size = new Size(iconSize, iconSize),
+                Location = new Point(36, (_windowChipHeight - iconSize) / 2),
+                SizeMode = PictureBoxSizeMode.Zoom,
                 BackColor = Color.Transparent,
-                Enabled = false
-            });
-            textX = 48;
+                Cursor = Cursors.SizeAll,
+                TabStop = false
+            };
+            iconBox.Disposed += (_, _) => iconImage.Dispose();
+            chip.Controls.Add(iconBox);
+            textX = 64;
         }
 
         var titleLbl = new Label
         {
-            Text = win.Title.Length > 30 ? win.Title[..30] + "…" : win.Title,
+            Text = win.Title,
             ForeColor = Color.FromArgb(225, 225, 235),
-            Font = new Font("Segoe UI", 9.2f),
-            Location = new Point(textX, 7),
-            Size = new Size(chip.Width - textX - 6, 18),
+            Font = UiFont(10.8f),
+            Location = new Point(textX, 0),
+            Size = new Size(chip.Width - textX - 6, chip.Height),
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoEllipsis = true,
             BackColor = Color.Transparent,
             Cursor = Cursors.SizeAll
         };
         chip.Controls.Add(titleLbl);
 
         _tips.SetToolTip(chip, L.T("ov.tip.window"));
-        _tips.SetToolTip(titleLbl, L.T("ov.tip.window"));
+        _tips.SetToolTip(titleLbl, win.Title);
 
         void Hover(bool on) => chip.BackColor = on ? ChipHover : ChipBg;
         void OnDown(object? s, MouseEventArgs e)
@@ -353,7 +473,10 @@ internal sealed class OverviewForm : Form
                 ShowWindowMenu(win, chip);
         }
 
-        foreach (Control c in new Control[] { chip, grip, titleLbl })
+        var dragControls = new List<Control> { chip, grip, titleLbl };
+        if (iconBox != null)
+            dragControls.Add(iconBox);
+        foreach (Control c in dragControls)
         {
             c.MouseEnter += (_, _) => Hover(true);
             c.MouseLeave += (_, _) => Hover(false);
@@ -376,8 +499,8 @@ internal sealed class OverviewForm : Form
                 var (device, local) = (mon.Device, desk.LocalIndex);
                 menu.Items.Add(label, null, (_, _) =>
                 {
-                    _mgr.MoveWindowToDesktop(win.Handle, device, local);
-                    BuildUi();
+                    RunAndRefreshOverview(() =>
+                        _mgr.MoveWindowToDesktop(win.Handle, device, local));
                 });
             }
         menu.Items.Add(new ToolStripSeparator());
@@ -395,28 +518,90 @@ internal sealed class OverviewForm : Form
     {
         var card = new BufferedPanel
         {
-            Size = new Size(72, 216),
+            Size = new Size(AddCardWidth, DesktopCardSize.Height),
             BackColor = BgColor,
             Margin = new Padding(7),
+            AllowDrop = true,
             Cursor = Cursors.Hand
         };
         bool hover = false;
+        bool dropHover = false;
         card.Paint += (_, e) =>
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using var pen = new Pen(hover ? Accent : CardBorder, 1.5f) { DashStyle = DashStyle.Dash };
+            Color highlight = dropHover ? DropAccent : Accent;
+            using var pen = new Pen(hover || dropHover ? highlight : CardBorder, dropHover ? 2.5f : 1.5f)
+            {
+                DashStyle = DashStyle.Dash
+            };
             using var path = RoundedRect(new Rectangle(1, 1, card.Width - 3, card.Height - 3), 10);
             e.Graphics.DrawPath(pen, path);
-            using var font = new Font("Segoe UI", 20f);
-            using var brush = new SolidBrush(hover ? Accent : TextDim);
+            using var font = UiFont(24f);
+            using var brush = new SolidBrush(hover || dropHover ? highlight : TextDim);
             var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
             e.Graphics.DrawString("+", font, brush, card.ClientRectangle, sf);
         };
         _tips.SetToolTip(card, L.T("ov.tip.add"));
         card.MouseEnter += (_, _) => { hover = true; card.Invalidate(); };
         card.MouseLeave += (_, _) => { hover = false; card.Invalidate(); };
-        card.Click += (_, _) => { _mgr.CreateDesktopAndSwitch(device); BuildUi(); };
+        card.DragEnter += (_, e) =>
+        {
+            if (e.Data?.GetData(typeof(WindowDrag)) is WindowDrag ||
+                e.Data?.GetData(typeof(DesktopDrag)) is DesktopDrag)
+            {
+                e.Effect = DragDropEffects.Move;
+                dropHover = true;
+                card.Invalidate();
+            }
+        };
+        card.DragLeave += (_, _) =>
+        {
+            dropHover = false;
+            card.Invalidate();
+        };
+        card.DragDrop += (_, e) =>
+        {
+            dropHover = false;
+            if (e.Data?.GetData(typeof(WindowDrag)) is WindowDrag window)
+            {
+                RunAndRefreshOverview(() =>
+                    _mgr.CreateDesktopAndMoveWindow(window.Handle, device));
+            }
+            else if (e.Data?.GetData(typeof(DesktopDrag)) is DesktopDrag desktop)
+            {
+                RunAndRefreshOverview(() =>
+                    _mgr.MoveDesktop(desktop.Device, desktop.LocalIndex, device, int.MaxValue));
+            }
+        };
+        card.Click += (_, _) => RunAndRefreshOverview(() => _mgr.CreateDesktop(device));
         return card;
+    }
+
+    private void RunAndRefreshOverview(Action action)
+    {
+        _keepOpenOnDeactivate = true;
+        try
+        {
+            action();
+            BuildUi();
+        }
+        catch
+        {
+            _keepOpenOnDeactivate = false;
+            throw;
+        }
+        BeginInvoke((Action)(() =>
+        {
+            if (IsDisposed) return;
+            Activate();
+            _keepOpenOnDeactivate = false;
+        }));
+    }
+
+    private static Font UiFont(float size, FontStyle style = FontStyle.Regular)
+    {
+        var family = SystemFonts.MessageBoxFont?.FontFamily ?? FontFamily.GenericSansSerif;
+        return new Font(family, size, style, GraphicsUnit.Point);
     }
 
     private static GraphicsPath RoundedRect(Rectangle r, int radius)

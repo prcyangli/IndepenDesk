@@ -9,6 +9,7 @@ internal sealed class TrayApp : ApplicationContext
     private const int HkMoveNext = 4;
     private const int HkOverview = 5;
     private const int HkDesktopBase = 10; // 10..18 => global masaüstü 1..9
+    private static readonly bool EnableAnimations = false;
 
     private readonly DesktopManager _manager = new();
     private readonly NotifyIcon _tray;
@@ -20,7 +21,9 @@ internal sealed class TrayApp : ApplicationContext
     public TrayApp()
     {
         _hotkeys = new HotkeyWindow(OnHotkey);
+#if !DEBUG
         StartupManager.ApplyOnLaunch();
+#endif
 
         _tray = new NotifyIcon
         {
@@ -32,19 +35,24 @@ internal sealed class TrayApp : ApplicationContext
 
         _manager.SwitchStarting += (device, from, to) =>
         {
-            if (!OverviewForm.IsOpen) // genel bakış açıkken animasyon oynatma
+            if (EnableAnimations && !OverviewForm.IsOpen) // genel bakış açıkken animasyon oynatma
                 _animator.Begin(device, to > from ? +1 : -1);
         };
 
         _manager.DesktopSwitched += info =>
         {
-            _animator.Commit(info.Device);
+            if (EnableAnimations)
+                _animator.Commit(info.Device);
             _osd.ShowSwitch(info);
         };
 
         RegisterHotkeys();
 
         _manager.Sync();
+#if DEBUG
+        // Debug builds are used for local UI verification, so show the overview immediately.
+        OverviewForm.Toggle(_manager);
+#endif
         _syncTimer.Tick += (_, _) => { if (!OverviewForm.IsOpen) _manager.Sync(); };
         _syncTimer.Start();
     }

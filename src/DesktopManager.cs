@@ -30,6 +30,7 @@ internal sealed class DesktopManager
 
     private readonly Dictionary<string, MonitorState> _monitors = new();
     private readonly HashSet<IntPtr> _hidden = new();
+    private readonly HashSet<HashSet<IntPtr>> _retainedEmptyDesktops = new(ReferenceEqualityComparer.Instance);
     private readonly uint _ownPid = (uint)Environment.ProcessId;
     private readonly string _stateFile;
 
@@ -43,7 +44,8 @@ internal sealed class DesktopManager
     private static readonly string[] ClassBlacklist =
     {
         "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
-        "Windows.UI.Core.CoreWindow", "XamlExplorerHostIslandWindow"
+        "Windows.UI.Core.CoreWindow", "XamlExplorerHostIslandWindow",
+        "Xaml_WindowedPopupClass", "COMTASKSWINDOWCLASS"
     };
 
     public DesktopManager()
@@ -148,9 +150,11 @@ internal sealed class DesktopManager
     }
 
     /// <summary>Aktif masaüstünün gerisindeki boş son masaüstlerini kaldırır.</summary>
-    private static void PruneTrailingEmpty(MonitorState st)
+    private void PruneTrailingEmpty(MonitorState st)
     {
-        while (st.Desktops.Count - 1 > st.Current && st.Desktops[^1].Count == 0)
+        while (st.Desktops.Count - 1 > st.Current &&
+               st.Desktops[^1].Count == 0 &&
+               !_retainedEmptyDesktops.Contains(st.Desktops[^1]))
         {
             st.Desktops.RemoveAt(st.Desktops.Count - 1);
             st.LastActive.RemoveAt(st.LastActive.Count - 1);
@@ -173,12 +177,15 @@ internal sealed class DesktopManager
         foreach (string dev in _monitors.Keys.Where(d => !currentDevices.Contains(d)).ToList())
         {
             foreach (var set in _monitors[dev].Desktops)
+            {
+                _retainedEmptyDesktops.Remove(set);
                 foreach (var h in set)
                     if (Native.IsWindow(h) && !Native.IsWindowVisible(h))
                     {
                         Native.ShowWindow(h, Native.SW_SHOWNA);
                         _hidden.Remove(h);
                     }
+            }
             _monitors.Remove(dev);
         }
 
@@ -303,6 +310,50 @@ internal sealed class DesktopManager
         SwitchToCore(st, st.Desktops.Count - 1);
     }
 
+    /// <summary>Yeni boş masaüstü oluşturur ancak aktif masaüstünü değiştirmez.</summary>
+    public bool CreateDesktop(string device)
+    {
+        Sync();
+        if (!_monitors.TryGetValue(device, out var st)) return false;
+        if (st.Desktops.Count >= MaxDesktopsPerMonitor) return false;
+        AddDesktop(st);
+        _retainedEmptyDesktops.Add(st.Desktops[^1]);
+        return true;
+    }
+
+    /// <summary>Yeni bir masaüstü oluşturur ve sürüklenen pencereyi ona taşır;
+    /// genel bakışın açık kalabilmesi için yeni masaüstüne geçiş yapmaz.</summary>
+    public bool CreateDesktopAndMoveWindow(IntPtr h, string dstDevice)
+    {
+        Sync();
+        if (!Native.IsWindow(h)) return false;
+        if (!_monitors.TryGetValue(dstDevice, out var dst)) return false;
+        if (dst.Desktops.Count >= MaxDesktopsPerMonitor) return false;
+
+        AddDesktop(dst);
+        int target = dst.Desktops.Count - 1;
+        _retainedEmptyDesktops.Add(dst.Desktops[target]);
+
+        string? srcDevice = null;
+        foreach (var st in _monitors.Values)
+            foreach (var set in st.Desktops)
+                if (set.Remove(h))
+                    srcDevice = st.Device;
+
+        if (srcDevice != null && srcDevice != dstDevice)
+            RepositionWindow(h, srcDevice, dstDevice);
+
+        dst.Desktops[target].Add(h);
+        dst.LastActive[target] = h;
+
+        if (Native.IsWindowVisible(h) && Native.ShowWindow(h, Native.SW_HIDE))
+            _hidden.Add(h);
+
+        foreach (var st in _monitors.Values) PruneTrailingEmpty(st);
+        PersistHidden();
+        return true;
+    }
+
     private void SwitchToCore(MonitorState st, int target)
     {
         if (st.Current == target)
@@ -404,19 +455,39 @@ internal sealed class DesktopManager
         PersistHidden();
     }
 
-    /// <summary>Bir masaüstünü tüm pencereleriyle başka monitöre taşır (sonuna eklenir).</summary>
-    public void MoveDesktopToMonitor(string srcDevice, int srcLocal, string dstDevice)
+    /// <summary>Bir masaüstünü aynı veya başka monitörde belirtilen ekleme konumuna taşır.</summary>
+    public bool MoveDesktop(string srcDevice, int srcLocal, string dstDevice, int dstInsertIndex)
     {
         Sync();
-        if (srcDevice == dstDevice) return;
-        if (!_monitors.TryGetValue(srcDevice, out var src)) return;
-        if (!_monitors.TryGetValue(dstDevice, out var dst)) return;
-        if (srcLocal < 0 || srcLocal >= src.Desktops.Count) return;
-        if (dst.Desktops.Count >= MaxDesktopsPerMonitor) return;
+        if (!_monitors.TryGetValue(srcDevice, out var src)) return false;
+        if (!_monitors.TryGetValue(dstDevice, out var dst)) return false;
+        if (srcLocal < 0 || srcLocal >= src.Desktops.Count) return false;
+
+        if (srcDevice == dstDevice)
+        {
+            var current = src.Desktops[src.Current];
+            var reorderedDesktop = src.Desktops[srcLocal];
+            var reorderedLastActive = src.LastActive[srcLocal];
+
+            dstInsertIndex = Math.Clamp(dstInsertIndex, 0, src.Desktops.Count);
+            src.Desktops.RemoveAt(srcLocal);
+            src.LastActive.RemoveAt(srcLocal);
+            if (dstInsertIndex > srcLocal) dstInsertIndex--;
+
+            src.Desktops.Insert(dstInsertIndex, reorderedDesktop);
+            src.LastActive.Insert(dstInsertIndex, reorderedLastActive);
+            src.Current = src.Desktops.IndexOf(current);
+            PersistHidden();
+            return true;
+        }
+
+        if (dst.Desktops.Count >= MaxDesktopsPerMonitor) return false;
+        dstInsertIndex = Math.Clamp(dstInsertIndex, 0, dst.Desktops.Count);
 
         var set = src.Desktops[srcLocal];
         var last = src.LastActive[srcLocal];
         bool wasCurrent = src.Current == srcLocal;
+        var dstCurrent = dst.Desktops[dst.Current];
 
         src.Desktops.RemoveAt(srcLocal);
         src.LastActive.RemoveAt(srcLocal);
@@ -433,8 +504,9 @@ internal sealed class DesktopManager
                 _hidden.Add(h);
         }
 
-        dst.Desktops.Add(set);
-        dst.LastActive.Add(last);
+        dst.Desktops.Insert(dstInsertIndex, set);
+        dst.LastActive.Insert(dstInsertIndex, last);
+        dst.Current = dst.Desktops.IndexOf(dstCurrent);
 
         // Kaynak monitörde aktif masaüstü taşındıysa kalan aktif masaüstünü görünür yap
         if (wasCurrent)
@@ -447,6 +519,7 @@ internal sealed class DesktopManager
 
         PruneTrailingEmpty(src);
         PersistHidden();
+        return true;
     }
 
     /// <summary>Pencereyi kaynak monitördeki göreli konumunu koruyarak hedef monitöre taşır.</summary>

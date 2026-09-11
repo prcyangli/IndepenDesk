@@ -4,6 +4,8 @@
 
 **Windows 上每个显示器独立的虚拟桌面** — 相当于 macOS 的"显示器具有单独的空间"功能。
 
+本地功能修改、验证结果和待修复问题请参阅 [项目修改与审查记录](PROJECT_NOTES.zh-CN.md)。
+
 ## 问题
 
 Windows 的虚拟桌面是全局的：按 `Win+Ctrl+←/→` 会**同时切换所有显示器**。而在 macOS 上，每个屏幕都有自己的空间（Spaces），只有光标所在的屏幕会切换。IndepenDesk 把这种体验带到了 Windows。
