@@ -7,7 +7,7 @@ namespace IndepenDesk;
 /// <summary>GitHub Releases üzerinden güncelleme denetimi.</summary>
 internal static class UpdateChecker
 {
-    public const string RepoOwner = "harungecit";
+    public const string RepoOwner = "prcyangli";
     public const string RepoName = "IndepenDesk";
     public static string RepoUrl => $"https://github.com/{RepoOwner}/{RepoName}";
 

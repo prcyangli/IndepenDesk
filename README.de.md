@@ -30,13 +30,12 @@ Läuft unter Windows 10 (1607+) und Windows 11 auf **x64, x86 und ARM64**. Alle 
 winget install harungecit.IndepenDesk
 ```
 
-**Installer (empfohlen):** `IndepenDesk-Setup-<Version>-<Arch>.exe` von den [Releases](https://github.com/harungecit/IndepenDesk/releases) herunterladen und ausführen — mit optionalem Desktop-Symbol, in 7 Sprachen.
+**Installer (empfohlen):** `IndepenDesk-Setup-<Version>-<Arch>.exe` von den [Releases](https://github.com/prcyangli/IndepenDesk/releases) herunterladen und ausführen — mit optionalem Desktop-Symbol, in 7 Sprachen.
 
 **MSI** (Unternehmens-/GPO-Bereitstellung): `IndepenDesk-<Version>-<Arch>.msi`.
 
 **Portabel:** `IndepenDesk-v<Version>-win-<Arch>.zip` — entpacken und starten, keine Installation.
 
-**MSIX:** mit einem selbstsignierten Zertifikat signiert — zuerst `IndepenDesk.cer` unter *Lokaler Computer → Vertrauenswürdige Personen* installieren, dann die `.msix` doppelklicken.
 
 Die App sitzt im Infobereich (Symbol mit zwei blauen Bildschirmen).
 

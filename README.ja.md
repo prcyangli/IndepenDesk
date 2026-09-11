@@ -30,13 +30,12 @@ Windows 10 (1607+) と Windows 11 の **x64、x86、ARM64** に対応。すべ�
 winget install harungecit.IndepenDesk
 ```
 
-**インストーラー（推奨）：** [Releases](https://github.com/harungecit/IndepenDesk/releases) から `IndepenDesk-Setup-<バージョン>-<アーキテクチャ>.exe` をダウンロードして実行 — デスクトップアイコンをオプションで選択可能、7 言語対応。
+**インストーラー（推奨）：** [Releases](https://github.com/prcyangli/IndepenDesk/releases) から `IndepenDesk-Setup-<バージョン>-<アーキテクチャ>.exe` をダウンロードして実行 — デスクトップアイコンをオプションで選択可能、7 言語対応。
 
 **MSI**（企業 / GPO 展開向け）：`IndepenDesk-<バージョン>-<アーキテクチャ>.msi`。
 
 **ポータブル版：** `IndepenDesk-v<バージョン>-win-<アーキテクチャ>.zip` — 展開して実行するだけ。
 
-**MSIX：** 自己署名証明書で署名 — 先に `IndepenDesk.cer` を*ローカルコンピューター → 信頼されたユーザー*にインストールしてから `.msix` をダブルクリック。
 
 アプリはシステムトレイに常駐します（2 つの青い画面のアイコン）。
 

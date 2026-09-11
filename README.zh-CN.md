@@ -32,13 +32,12 @@ Windows 的虚拟桌面是全局的：按 `Win+Ctrl+←/→` 会**同时切换�
 winget install harungecit.IndepenDesk
 ```
 
-**安装程序（推荐）：** 从 [Releases](https://github.com/harungecit/IndepenDesk/releases) 下载 `IndepenDesk-Setup-<版本>-<架构>.exe` 并运行 — 可选桌面图标，提供 7 种安装语言。
+**安装程序（推荐）：** 从 [Releases](https://github.com/prcyangli/IndepenDesk/releases) 下载 `IndepenDesk-Setup-<版本>-<架构>.exe` 并运行 — 可选桌面图标，提供 7 种安装语言。
 
 **MSI**（企业 / GPO 部署）：`IndepenDesk-<版本>-<架构>.msi`。
 
 **便携版：** `IndepenDesk-v<版本>-win-<架构>.zip` — 解压即用，无需安装。
 
-**MSIX：** 使用自签名证书签名 — 请先将 `IndepenDesk.cer` 安装到*本地计算机 → 受信任人*，然后双击 `.msix`。
 
 程序驻留在系统托盘（两个蓝色屏幕图标）。
 

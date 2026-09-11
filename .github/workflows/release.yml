@@ -58,40 +58,6 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }
 
-      - name: Build and sign MSIX packages
-        shell: pwsh
-        env:
-          MSIX_PFX_BASE64: ${{ secrets.MSIX_PFX_BASE64 }}
-          MSIX_PFX_PASSWORD: ${{ secrets.MSIX_PFX_PASSWORD }}
-        run: |
-          $version = "$env:GITHUB_REF_NAME".TrimStart("v")
-          $version4 = "$version.0"
-          $pfx = "$env:RUNNER_TEMP\msix.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:MSIX_PFX_BASE64))
-
-          $kits = "C:\Program Files (x86)\Windows Kits\10\bin"
-          $makeappx = Get-ChildItem $kits -Recurse -Filter makeappx.exe |
-            Where-Object FullName -Match "\\x64\\" | Sort-Object FullName | Select-Object -Last 1
-          $signtool = Get-ChildItem $kits -Recurse -Filter signtool.exe |
-            Where-Object FullName -Match "\\x64\\" | Sort-Object FullName | Select-Object -Last 1
-
-          foreach ($arch in "x64","x86","arm64") {
-            $stage = "msix-stage\$arch"
-            New-Item -ItemType Directory -Force "$stage\Assets" | Out-Null
-            Copy-Item "publish\$arch\IndepenDesk.exe" $stage
-            Copy-Item "packaging\Assets\*" "$stage\Assets"
-            (Get-Content packaging\AppxManifest.xml -Raw) `
-              -replace '\{VERSION4\}', $version4 -replace '\{ARCH\}', $arch |
-              Set-Content "$stage\AppxManifest.xml" -Encoding utf8
-            $out = "artifacts\IndepenDesk-$version-$arch.msix"
-            & $makeappx.FullName pack /d $stage /p $out /o
-            if ($LASTEXITCODE -ne 0) { exit 1 }
-            & $signtool.FullName sign /fd SHA256 /f $pfx /p $env:MSIX_PFX_PASSWORD $out
-            if ($LASTEXITCODE -ne 0) { exit 1 }
-          }
-          Copy-Item packaging\IndepenDesk.cer artifacts\
-          Remove-Item $pfx
-
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:

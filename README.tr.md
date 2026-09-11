@@ -30,13 +30,12 @@ Windows 10 (1607+) ve Windows 11'de **x64, x86 ve ARM64** üzerinde çalışır.
 winget install harungecit.IndepenDesk
 ```
 
-**Kurulum sihirbazı (önerilen):** [Releases](https://github.com/harungecit/IndepenDesk/releases) sayfasından `IndepenDesk-Setup-<sürüm>-<mimari>.exe` indirip çalıştırın — isteğe bağlı masaüstü simgesi, 7 kurulum dili.
+**Kurulum sihirbazı (önerilen):** [Releases](https://github.com/prcyangli/IndepenDesk/releases) sayfasından `IndepenDesk-Setup-<sürüm>-<mimari>.exe` indirip çalıştırın — isteğe bağlı masaüstü simgesi, 7 kurulum dili.
 
 **MSI** (kurumsal / GPO dağıtımı): `IndepenDesk-<sürüm>-<mimari>.msi`.
 
 **Taşınabilir:** `IndepenDesk-v<sürüm>-win-<mimari>.zip` — açıp çalıştırın, kurulum gerekmez.
 
-**MSIX:** öz imzalı sertifikayla imzalıdır — önce `IndepenDesk.cer` dosyasını *Yerel Makine → Güvenilen Kişiler* deposuna kurun, sonra `.msix`'e çift tıklayın.
 
 Uygulama sistem tepsisinde durur (iki mavi ekran simgesi).
 
