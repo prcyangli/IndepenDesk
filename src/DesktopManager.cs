@@ -354,6 +354,67 @@ internal sealed class DesktopManager
         return true;
     }
 
+    /// <summary>Bir masaüstünü kapatır ve pencerelerini önceki masaüstüne taşır.
+    /// İlk masaüstü kapatılırsa pencereler ikinci masaüstüne gider. Her monitörde
+    /// en az bir masaüstü kalır.</summary>
+    public bool DeleteDesktop(string device, int localIndex)
+    {
+        Sync();
+        if (!_monitors.TryGetValue(device, out var st)) return false;
+        if (st.Desktops.Count <= 1) return false;
+        if (localIndex < 0 || localIndex >= st.Desktops.Count) return false;
+
+        var removed = st.Desktops[localIndex];
+        var current = st.Desktops[st.Current];
+        bool removedWasCurrent = ReferenceEquals(removed, current);
+        int targetBeforeRemoval = localIndex > 0 ? localIndex - 1 : 1;
+        var target = st.Desktops[targetBeforeRemoval];
+
+        IntPtr movedFocus = st.LastActive[localIndex];
+        if (!Native.IsWindow(movedFocus) || !removed.Contains(movedFocus))
+            movedFocus = removed.FirstOrDefault(Native.IsWindow);
+
+        foreach (var h in removed)
+            if (Native.IsWindow(h))
+                target.Add(h);
+
+        _retainedEmptyDesktops.Remove(removed);
+        st.Desktops.RemoveAt(localIndex);
+        st.LastActive.RemoveAt(localIndex);
+
+        int targetIndex = st.Desktops.IndexOf(target);
+        st.Current = removedWasCurrent ? targetIndex : st.Desktops.IndexOf(current);
+
+        if (targetIndex >= 0 && movedFocus != IntPtr.Zero &&
+            (removedWasCurrent || !Native.IsWindow(st.LastActive[targetIndex])))
+            st.LastActive[targetIndex] = movedFocus;
+
+        bool targetIsCurrent = st.Current == targetIndex;
+        foreach (var h in target.ToList())
+        {
+            if (!Native.IsWindow(h))
+            {
+                target.Remove(h);
+                _hidden.Remove(h);
+                continue;
+            }
+
+            if (targetIsCurrent)
+            {
+                if (!Native.IsWindowVisible(h)) Native.ShowWindow(h, Native.SW_SHOWNA);
+                _hidden.Remove(h);
+            }
+            else if (Native.IsWindowVisible(h) && Native.ShowWindow(h, Native.SW_HIDE))
+            {
+                _hidden.Add(h);
+            }
+        }
+
+        PruneTrailingEmpty(st);
+        PersistHidden();
+        return true;
+    }
+
     private void SwitchToCore(MonitorState st, int target)
     {
         if (st.Current == target)

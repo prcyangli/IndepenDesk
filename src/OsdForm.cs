@@ -6,7 +6,6 @@ namespace IndepenDesk;
 internal sealed class OsdForm : Form
 {
     private readonly System.Windows.Forms.Timer _hideTimer = new() { Interval = 950 };
-    private string _title = "";
     private string _subtitle = "";
 
     public OsdForm()
@@ -37,10 +36,19 @@ internal sealed class OsdForm : Form
     {
         var screen = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == info.Device) ?? Screen.PrimaryScreen;
         if (screen == null) return;
+        _subtitle = L.F("osd.desktop", info.LocalIndex + 1);
+
+        using (var font = new Font("Segoe UI", 16f, FontStyle.Bold))
+        {
+            var measured = TextRenderer.MeasureText(_subtitle, font, Size.Empty,
+                TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+            int maxWidth = Math.Max(250, screen.WorkingArea.Width - 32);
+            Width = Math.Min(maxWidth, Math.Max(250, measured.Width + 48));
+            Height = Math.Max(104, measured.Height + 36);
+        }
+
         var b = screen.Bounds;
         Location = new Point(b.Left + (b.Width - Width) / 2, b.Top + (b.Height - Height) / 2);
-        _title = L.F("osd.desktop", info.GlobalNumber);
-        _subtitle = L.F("osd.sub", info.Ordinal, info.LocalIndex + 1, info.LocalCount);
         if (!Visible) Show();
         Invalidate();
         _hideTimer.Stop();
@@ -53,14 +61,16 @@ internal sealed class OsdForm : Form
         using var path = RoundedRect(new Rectangle(0, 0, Width - 1, Height - 1), 14);
         using var bg = new SolidBrush(Color.FromArgb(30, 30, 34));
         e.Graphics.FillPath(bg, path);
-        var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+        using var sf = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap,
+            Trimming = StringTrimming.EllipsisCharacter
+        };
         using var titleFont = new Font("Segoe UI", 16f, FontStyle.Bold);
-        using var subFont = new Font("Segoe UI", 9.5f);
-        using var subBrush = new SolidBrush(Color.FromArgb(180, 180, 190));
-        e.Graphics.DrawString(_title, titleFont, Brushes.White,
-            new Rectangle(0, 12, Width, 44), sf);
-        e.Graphics.DrawString(_subtitle, subFont, subBrush,
-            new Rectangle(0, 58, Width, 30), sf);
+        e.Graphics.DrawString(_subtitle, titleFont, Brushes.White,
+            ClientRectangle, sf);
     }
 
     private static GraphicsPath RoundedRect(Rectangle r, int radius)

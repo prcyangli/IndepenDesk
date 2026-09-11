@@ -10,6 +10,8 @@ namespace IndepenDesk;
 internal sealed class HelpForm : Form
 {
     private static HelpForm? _open;
+    private readonly float _layoutScale;
+    private readonly int _contentWidth;
 
     public static void ShowHelp()
     {
@@ -25,19 +27,40 @@ internal sealed class HelpForm : Form
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         MinimizeBox = false;
-        StartPosition = FormStartPosition.CenterScreen;
+        StartPosition = FormStartPosition.Manual;
         BackColor = Color.FromArgb(24, 24, 28);
-        ClientSize = new Size(720, 640);
-        Font = new Font("Segoe UI", 9.5f);
+        AutoScaleMode = AutoScaleMode.None;
+        AutoScroll = true;
+        var uiFontFamily = SystemFonts.MessageBoxFont?.FontFamily ?? FontFamily.GenericSansSerif;
+        Font = new Font(uiFontFamily, 9.5f);
 
-        int y = 18;
+        var screen = Screen.FromPoint(Cursor.Position);
+        Location = new Point(screen.WorkingArea.Left + 16, screen.WorkingArea.Top + 16);
+        using (var graphics = CreateGraphics())
+            _layoutScale = Math.Clamp(graphics.DpiX / 96f, 1f, 4f);
+        _contentWidth = ScalePx(672);
+
+        int desiredWidth = ScalePx(720);
+        int desiredHeight = ScalePx(640);
+        ClientSize = new Size(
+            Math.Min(desiredWidth, Math.Max(480, screen.WorkingArea.Width - ScalePx(32))),
+            Math.Min(desiredHeight, Math.Max(420, screen.WorkingArea.Height - ScalePx(32))));
+        Location = new Point(
+            screen.WorkingArea.Left + (screen.WorkingArea.Width - Width) / 2,
+            screen.WorkingArea.Top + (screen.WorkingArea.Height - Height) / 2);
+
+        int y = ScalePx(18);
         y = AddHeader(L.T("help.shortcuts.header"), y);
         y = AddBody(L.T("help.shortcuts.body").Replace("&&", "&"), y);
 
         y = AddHeader(L.T("help.demo.header"), y);
-        var demo = new GesturePanel { Location = new Point(24, y), Size = new Size(672, 190) };
+        var demo = new GesturePanel
+        {
+            Location = new Point(ScalePx(24), y),
+            Size = new Size(_contentWidth, ScalePx(190))
+        };
         Controls.Add(demo);
-        y += 196;
+        y += ScalePx(196);
 
         y = AddHeader(L.T("help.touchpad.header"), y);
         y = AddBody(L.T("help.touchpad.body").Replace("&&", "&"), y);
@@ -45,8 +68,8 @@ internal sealed class HelpForm : Form
         var openBtn = new Button
         {
             Text = L.T("help.touchpad.open"),
-            Location = new Point(24, y + 4),
-            Size = new Size(260, 34),
+            Location = new Point(ScalePx(24), y + ScalePx(4)),
+            Size = new Size(ScalePx(260), ScalePx(34)),
             FlatStyle = FlatStyle.Flat,
             ForeColor = Color.White,
             BackColor = Color.FromArgb(60, 110, 180)
@@ -59,8 +82,8 @@ internal sealed class HelpForm : Form
         var closeBtn = new Button
         {
             Text = L.T("help.close"),
-            Location = new Point(596, y + 4),
-            Size = new Size(100, 34),
+            Location = new Point(ScalePx(596), y + ScalePx(4)),
+            Size = new Size(ScalePx(100), ScalePx(34)),
             FlatStyle = FlatStyle.Flat,
             ForeColor = Color.White,
             BackColor = Color.FromArgb(60, 60, 70)
@@ -69,7 +92,7 @@ internal sealed class HelpForm : Form
         closeBtn.Click += (_, _) => Close();
         Controls.Add(closeBtn);
 
-        ClientSize = new Size(720, y + 54);
+        AutoScrollMinSize = new Size(0, y + ScalePx(54));
     }
 
     private int AddHeader(string text, int y)
@@ -78,11 +101,11 @@ internal sealed class HelpForm : Form
         {
             Text = text,
             ForeColor = Color.FromArgb(120, 170, 235),
-            Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
-            Location = new Point(22, y),
+            Font = new Font(Font.FontFamily, 11.5f, FontStyle.Bold),
+            Location = new Point(ScalePx(22), y),
             AutoSize = true
         });
-        return y + 30;
+        return y + ScalePx(30);
     }
 
     private int AddBody(string text, int y)
@@ -91,13 +114,15 @@ internal sealed class HelpForm : Form
         {
             Text = text,
             ForeColor = Color.FromArgb(215, 215, 225),
-            Location = new Point(24, y),
-            MaximumSize = new Size(672, 0),
+            Location = new Point(ScalePx(24), y),
+            MaximumSize = new Size(_contentWidth, 0),
             AutoSize = true
         };
         Controls.Add(lbl);
-        return y + lbl.GetPreferredSize(new Size(672, 0)).Height + 14;
+        return y + lbl.GetPreferredSize(new Size(_contentWidth, 0)).Height + ScalePx(14);
     }
+
+    private int ScalePx(int value) => (int)Math.Round(value * _layoutScale);
 
     /// <summary>Touchpad hareketlerini döngü halinde canlandıran panel:
     /// 4 parmak sağa → masaüstü kayar; sola → geri; yukarı → genel bakış ızgarası.</summary>
@@ -127,6 +152,11 @@ internal sealed class HelpForm : Form
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            const float designWidth = 672f;
+            const float designHeight = 190f;
+            float canvasScale = Math.Min(Width / designWidth, Height / designHeight);
+            var state = g.Save();
+            g.ScaleTransform(canvasScale, canvasScale);
             double p = Math.Min(1.0, _t);
             double ease = 1 - Math.Pow(1 - p, 3);
 
@@ -208,10 +238,19 @@ internal sealed class HelpForm : Form
 
             // Alt yazı
             string caption = _phase == 2 ? L.T("help.demo.swipeUp") : L.T("help.demo.swipeLR");
-            using var capFont = new Font("Segoe UI", 9.5f);
+            var captionFontFamily = SystemFonts.MessageBoxFont?.FontFamily ?? FontFamily.GenericSansSerif;
+            using var capFont = new Font(captionFontFamily, 12.7f, GraphicsUnit.Pixel);
             using var capBrush = new SolidBrush(Color.FromArgb(200, 200, 212));
-            g.DrawString(caption, capFont, capBrush, new Rectangle(10, Height - 26, Width - 20, 22),
-                new StringFormat { Alignment = StringAlignment.Center });
+            using var captionFormat = new StringFormat
+            {
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center,
+                FormatFlags = StringFormatFlags.NoWrap,
+                Trimming = StringTrimming.EllipsisCharacter
+            };
+            g.DrawString(caption, capFont, capBrush, new RectangleF(10, 162, designWidth - 20, 24),
+                captionFormat);
+            g.Restore(state);
         }
     }
 }

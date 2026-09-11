@@ -5,15 +5,16 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        ApplicationConfiguration.Initialize();
+
         using var mutex = new Mutex(true, "IndepenDesk_SingleInstance", out bool isNew);
         if (!isNew)
         {
-            MessageBox.Show("IndepenDesk zaten çalışıyor.", "IndepenDesk",
+            MessageBox.Show(L.T("msg.alreadyRunning"), "IndepenDesk",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
-        ApplicationConfiguration.Initialize();
         Application.Run(new TrayApp());
     }
 }

@@ -25,10 +25,16 @@ internal sealed class OverviewForm : Form
     private static readonly Color ChipHover = Color.FromArgb(72, 72, 84);
     private static readonly Color ChipBorder = Color.FromArgb(80, 80, 94);
     private static readonly Color TextDim = Color.FromArgb(150, 150, 162);
-    private static readonly Size DesktopCardSize = new(384, 280);
-    private const int AddCardWidth = 92;
-    private const int WindowChipSpacing = 6;
+    // Keep cards wide enough for the DPI-scaled header, but short enough for
+    // two wrapped rows per monitor (four rows total with two monitors).
+    private static readonly Size DesktopCardDesignSize = new(400, 200);
+    private const int AddCardDesignWidth = 100;
+    private const int WindowChipDesignSpacing = 3;
 
+    private readonly float _layoutScale;
+    private readonly Size _desktopCardSize;
+    private readonly int _addCardWidth;
+    private readonly int _windowChipSpacing;
     private readonly int _windowChipHeight;
     private bool _keepOpenOnDeactivate;
 
@@ -63,8 +69,18 @@ internal sealed class OverviewForm : Form
                                b.Width * 10 / 12, b.Height * 10 / 12);
 
         using (var graphics = CreateGraphics())
-        using (var windowFont = UiFont(10.8f))
-            _windowChipHeight = Math.Max(38, (int)Math.Ceiling(windowFont.GetHeight(graphics)) + 10);
+        using (var windowFont = UiFont(8.8f))
+        {
+            // Fonts already follow PerMonitorV2. Scale fixed geometry more gently so
+            // cards stay usable at 200-300% without becoming larger than the screen.
+            float dpiScale = Math.Clamp(graphics.DpiX / 96f, 1f, 4f);
+            _layoutScale = Math.Clamp(1f + (dpiScale - 1f) * 0.25f, 1f, 1.75f);
+            _desktopCardSize = ScaleSize(DesktopCardDesignSize);
+            _addCardWidth = ScalePx(AddCardDesignWidth);
+            _windowChipSpacing = ScalePx(WindowChipDesignSpacing);
+            _windowChipHeight = Math.Max(ScalePx(29),
+                (int)Math.Ceiling(windowFont.GetHeight(graphics)) + ScalePx(5));
+        }
 
         KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) Close(); };
         Deactivate += (_, _) =>
@@ -87,7 +103,7 @@ internal sealed class OverviewForm : Form
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
             AutoScroll = true,
-            Padding = new Padding(22, 16, 22, 16)
+            Padding = ScalePadding(22, 16, 22, 16)
         };
         Controls.Add(root);
 
@@ -98,8 +114,8 @@ internal sealed class OverviewForm : Form
             BackColor = CardBg,
             FlatStyle = FlatStyle.Flat,
             TextAlign = ContentAlignment.MiddleCenter,
-            Size = new Size(72, 60),
-            Location = new Point(ClientSize.Width - 86, 12),
+            Size = ScaleSize(new Size(72, 60)),
+            Location = new Point(ClientSize.Width - ScalePx(86), ScalePx(12)),
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
             Cursor = Cursors.Hand,
             TabStop = false,
@@ -135,7 +151,7 @@ internal sealed class OverviewForm : Form
             ForeColor = Color.White,
             Font = UiFont(15f, FontStyle.Bold),
             AutoSize = true,
-            Margin = new Padding(4, 0, 0, 2)
+            Margin = ScalePadding(4, 0, 0, 2)
         });
         root.Controls.Add(new Label
         {
@@ -143,7 +159,7 @@ internal sealed class OverviewForm : Form
             ForeColor = TextDim,
             Font = UiFont(9.5f),
             AutoSize = true,
-            Margin = new Padding(4, 0, 0, 14)
+            Margin = ScalePadding(4, 0, 0, 14)
         });
 
         foreach (var mon in _mgr.GetLayout())
@@ -154,22 +170,24 @@ internal sealed class OverviewForm : Form
                 ForeColor = Color.White,
                 Font = UiFont(12.5f, FontStyle.Bold),
                 AutoSize = true,
-                Margin = new Padding(4, 10, 0, 4)
+                Margin = ScalePadding(4, 10, 0, 4)
             });
 
             var row = new BufferedPanel
             {
-                AutoSize = true,
+                AutoSize = false,
                 AllowDrop = true,
-                Padding = new Padding(4),
-                Margin = new Padding(0, 0, 0, 8)
+                Padding = new Padding(ScalePx(4)),
+                Margin = ScalePadding(0, 0, 0, 8),
+                Width = Math.Max(_desktopCardSize.Width + ScalePx(22),
+                    ClientSize.Width - root.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - ScalePx(8))
             };
             var flow = new FlowLayoutPanel
             {
                 FlowDirection = FlowDirection.LeftToRight,
                 WrapContents = true,
-                AutoSize = true,
-                Location = new Point(4, 4)
+                AutoSize = false,
+                Location = new Point(ScalePx(4), ScalePx(4))
             };
             row.Controls.Add(flow);
 
@@ -205,6 +223,22 @@ internal sealed class OverviewForm : Form
 
             if (mon.Desktops.Count < DesktopManager.MaxDesktopsPerMonitor)
                 flow.Controls.Add(BuildAddCard(mon.Device));
+
+            int flowWidth = row.ClientSize.Width - ScalePx(8);
+            int usedWidth = 0;
+            int lineCount = 1;
+            foreach (Control item in flow.Controls)
+            {
+                int itemWidth = item.Width + item.Margin.Horizontal;
+                if (usedWidth > 0 && usedWidth + itemWidth > flowWidth)
+                {
+                    lineCount++;
+                    usedWidth = 0;
+                }
+                usedWidth += itemWidth;
+            }
+            row.Height = ScalePx(8) + lineCount * (_desktopCardSize.Height + ScalePx(14));
+            flow.Size = new Size(flowWidth, row.ClientSize.Height - ScalePx(8));
         }
     }
 
@@ -214,12 +248,42 @@ internal sealed class OverviewForm : Form
     {
         var card = new BufferedPanel
         {
-            Size = DesktopCardSize,
+            Size = _desktopCardSize,
             BackColor = CardBg,
-            Margin = new Padding(7),
+            Margin = new Padding(ScalePx(7)),
             AllowDrop = true,
             Cursor = Cursors.Hand
         };
+
+        System.Windows.Forms.Timer? singleClickTimer = null;
+        void CancelPendingSingleClick()
+        {
+            singleClickTimer?.Stop();
+            singleClickTimer?.Dispose();
+            singleClickTimer = null;
+        }
+        void ActivateDesktopAndClose()
+        {
+            CancelPendingSingleClick();
+            _mgr.SwitchTo(mon.Device, desk.LocalIndex);
+            Close();
+        }
+        void QueueSingleClickSwitch()
+        {
+            if (singleClickTimer != null) return;
+            singleClickTimer = new System.Windows.Forms.Timer
+            {
+                Interval = SystemInformation.DoubleClickTime
+            };
+            singleClickTimer.Tick += (_, _) =>
+            {
+                CancelPendingSingleClick();
+                if (!card.IsDisposed)
+                    RunAndRefreshOverview(() => _mgr.SwitchTo(mon.Device, desk.LocalIndex));
+            };
+            singleClickTimer.Start();
+        }
+        card.Disposed += (_, _) => CancelPendingSingleClick();
 
         bool dropHover = false;
         bool desktopDropHover = false;
@@ -242,30 +306,101 @@ internal sealed class OverviewForm : Form
             {
                 using var hint = UiFont(11f, FontStyle.Bold);
                 using var brush = new SolidBrush(DropAccent);
-                var sf = new StringFormat { Alignment = StringAlignment.Center };
+                using var sf = new StringFormat
+                {
+                    Alignment = StringAlignment.Center,
+                    LineAlignment = StringAlignment.Center,
+                    FormatFlags = StringFormatFlags.NoWrap,
+                    Trimming = StringTrimming.EllipsisCharacter
+                };
+                int hintHeight = (int)Math.Ceiling(hint.GetHeight(e.Graphics)) + ScalePx(8);
+                int horizontalInset = ScalePx(8);
+                int bottomInset = ScalePx(14);
                 e.Graphics.DrawString(L.T("ov.drop"), hint, brush,
-                    new Rectangle(0, card.Height - 28, card.Width, 24), sf);
+                    new Rectangle(horizontalInset,
+                        card.Height - hintHeight - bottomInset,
+                        card.Width - horizontalInset * 2,
+                        hintHeight), sf);
             }
         };
 
         // Başlık: kartı monitörler arası taşımak için sürükleme tutamacıdır
         var headerLbl = new Label
         {
-            Text = L.F("ov.desktop", desk.GlobalNumber),
+            Text = L.F("ov.desktop", desk.LocalIndex + 1),
             ForeColor = Color.White,
-            Font = UiFont(12.5f, FontStyle.Bold),
-            Location = new Point(12, 10),
-            AutoSize = true,
+            Font = UiFont(10.8f, FontStyle.Bold),
+            // Move the label above the button top slightly: the font's internal
+            // leading otherwise makes the visible glyphs look too low at 200% DPI.
+            Location = new Point(ScalePx(10), ScalePx(3)),
+            Size = new Size(card.Width - ScalePx(60), ScalePx(32)),
+            AutoSize = false,
+            AutoEllipsis = true,
+            TextAlign = ContentAlignment.TopLeft,
             Cursor = Cursors.SizeAll,
             BackColor = Color.Transparent
         };
         _tips.SetToolTip(headerLbl, L.T("ov.tip.header"));
+        Point? headerDragStart = null;
         headerLbl.MouseDown += (_, e) =>
         {
             if (e.Button == MouseButtons.Left)
-                headerLbl.DoDragDrop(new DataObject(new DesktopDrag(mon.Device, desk.LocalIndex)), DragDropEffects.Move);
+                headerDragStart = e.Location;
         };
+        headerLbl.MouseMove += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left || headerDragStart is not Point start) return;
+            var dragBounds = new Rectangle(
+                start.X - SystemInformation.DragSize.Width / 2,
+                start.Y - SystemInformation.DragSize.Height / 2,
+                SystemInformation.DragSize.Width,
+                SystemInformation.DragSize.Height);
+            if (dragBounds.Contains(e.Location)) return;
+            headerDragStart = null;
+            headerLbl.DoDragDrop(new DataObject(new DesktopDrag(mon.Device, desk.LocalIndex)), DragDropEffects.Move);
+        };
+        headerLbl.MouseUp += (_, _) => headerDragStart = null;
+        headerLbl.DoubleClick += (_, _) => ActivateDesktopAndClose();
         card.Controls.Add(headerLbl);
+
+        var deleteButton = new Button
+        {
+            Text = string.Empty,
+            Size = ScaleSize(new Size(36, 30)),
+            Location = new Point(card.Width - ScalePx(46), ScalePx(6)),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            BackColor = ChipBg,
+            FlatStyle = FlatStyle.Flat,
+            Cursor = mon.Desktops.Count > 1 ? Cursors.Hand : Cursors.Default,
+            Enabled = mon.Desktops.Count > 1,
+            TabStop = false,
+            AccessibleName = L.T("ov.tip.closeDesktop"),
+            UseVisualStyleBackColor = false
+        };
+        deleteButton.FlatAppearance.BorderSize = 1;
+        deleteButton.FlatAppearance.BorderColor = CardBorder;
+        deleteButton.FlatAppearance.MouseOverBackColor = Color.FromArgb(115, 52, 58);
+        deleteButton.FlatAppearance.MouseDownBackColor = Color.FromArgb(145, 58, 65);
+        deleteButton.Paint += (_, e) =>
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            float inset = Math.Min(deleteButton.ClientSize.Width, deleteButton.ClientSize.Height) * 0.31f;
+            float right = deleteButton.ClientSize.Width - inset;
+            float bottom = deleteButton.ClientSize.Height - inset;
+            Color color = deleteButton.Enabled ? Color.FromArgb(235, 190, 194) : TextDim;
+            using var pen = new Pen(color, Math.Max(2f, deleteButton.DeviceDpi / 64f))
+            {
+                StartCap = LineCap.Round,
+                EndCap = LineCap.Round
+            };
+            e.Graphics.DrawLine(pen, inset, inset, right, bottom);
+            e.Graphics.DrawLine(pen, right, inset, inset, bottom);
+        };
+        deleteButton.Click += (_, _) =>
+            RunAndRefreshOverview(() => _mgr.DeleteDesktop(mon.Device, desk.LocalIndex));
+        _tips.SetToolTip(deleteButton, L.T("ov.tip.closeDesktop"));
+        card.Controls.Add(deleteButton);
+        deleteButton.BringToFront();
 
         if (desk.IsCurrent)
         {
@@ -274,20 +409,27 @@ internal sealed class OverviewForm : Form
                 Text = L.T("ov.active"),
                 ForeColor = Color.White,
                 BackColor = Accent,
-                Font = UiFont(9.5f, FontStyle.Bold),
+                Font = UiFont(8.3f, FontStyle.Bold),
                 TextAlign = ContentAlignment.MiddleCenter,
                 AutoSize = true,
-                Padding = new Padding(5, 2, 5, 2)
+                Padding = ScalePadding(4, 1, 4, 1)
             };
             card.Controls.Add(badge);
-            badge.Location = new Point(card.Width - badge.PreferredSize.Width - 14, 11);
+            badge.Location = new Point(deleteButton.Left - badge.PreferredSize.Width - ScalePx(6), ScalePx(8));
+            headerLbl.Width = Math.Max(ScalePx(80), badge.Left - headerLbl.Left - ScalePx(4));
+            badge.BringToFront();
+        }
+        else
+        {
+            headerLbl.Width = Math.Max(ScalePx(80), deleteButton.Left - headerLbl.Left - ScalePx(4));
         }
 
-        int windowListTop = Math.Max(48, headerLbl.Top + headerLbl.PreferredHeight + 8);
+        int windowListTop = Math.Max(ScalePx(38),
+            headerLbl.Top + headerLbl.PreferredSize.Height + ScalePx(4));
         var windowList = new FlowLayoutPanel
         {
-            Location = new Point(12, windowListTop),
-            Size = new Size(card.Width - 24, card.Height - windowListTop - 12),
+            Location = new Point(ScalePx(10), windowListTop),
+            Size = new Size(card.Width - ScalePx(20), card.Height - windowListTop - ScalePx(8)),
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
             AutoScroll = true,
@@ -298,14 +440,14 @@ internal sealed class OverviewForm : Form
         };
         card.Controls.Add(windowList);
 
-        int contentHeight = desk.Windows.Count * (_windowChipHeight + WindowChipSpacing);
+        int contentHeight = desk.Windows.Count * (_windowChipHeight + _windowChipSpacing);
         bool needsVerticalScroll = contentHeight > windowList.ClientSize.Height;
         int scrollbarWidth = needsVerticalScroll ? SystemInformation.VerticalScrollBarWidth : 0;
         int chipWidth = windowList.ClientSize.Width - scrollbarWidth - 2;
         foreach (var win in desk.Windows)
         {
             var chip = BuildWindowChip(win, Point.Empty, chipWidth);
-            chip.Margin = new Padding(0, 0, 0, WindowChipSpacing);
+            chip.Margin = new Padding(0, 0, 0, _windowChipSpacing);
             windowList.Controls.Add(chip);
         }
 
@@ -319,7 +461,8 @@ internal sealed class OverviewForm : Form
                 BackColor = Color.Transparent
             });
 
-        card.Click += (_, _) => RunAndRefreshOverview(() => _mgr.SwitchTo(mon.Device, desk.LocalIndex));
+        card.Click += (_, _) => QueueSingleClickSwitch();
+        card.DoubleClick += (_, _) => ActivateDesktopAndClose();
 
         void OnDragEnter(object? sender, DragEventArgs e)
         {
@@ -386,6 +529,7 @@ internal sealed class OverviewForm : Form
         windowList.DragOver += OnDragOver;
         windowList.DragLeave += OnDragLeave;
         windowList.DragDrop += OnDragDrop;
+        windowList.DoubleClick += (_, _) => ActivateDesktopAndClose();
         return card;
     }
 
@@ -412,9 +556,9 @@ internal sealed class OverviewForm : Form
         {
             Text = "⠿",
             ForeColor = TextDim,
-            Font = new Font("Segoe UI", 12.5f),
-            Location = new Point(6, 0),
-            Size = new Size(24, _windowChipHeight),
+            Font = new Font("Segoe UI", 10f),
+            Location = new Point(ScalePx(4), 0),
+            Size = new Size(ScalePx(20), _windowChipHeight),
             TextAlign = ContentAlignment.MiddleCenter,
             AutoSize = false,
             BackColor = Color.Transparent,
@@ -422,18 +566,18 @@ internal sealed class OverviewForm : Form
         };
         chip.Controls.Add(grip);
 
-        int textX = 36;
+        int textX = ScalePx(28);
         PictureBox? iconBox = null;
         using var icon = Native.GetWindowSmallIcon(win.Handle);
         if (icon != null)
         {
             var iconImage = icon.ToBitmap();
-            int iconSize = Math.Min(24, _windowChipHeight - 12);
+            int iconSize = Math.Min(ScalePx(20), _windowChipHeight - ScalePx(8));
             iconBox = new PictureBox
             {
                 Image = iconImage,
                 Size = new Size(iconSize, iconSize),
-                Location = new Point(36, (_windowChipHeight - iconSize) / 2),
+                Location = new Point(ScalePx(28), (_windowChipHeight - iconSize) / 2),
                 SizeMode = PictureBoxSizeMode.Zoom,
                 BackColor = Color.Transparent,
                 Cursor = Cursors.SizeAll,
@@ -441,16 +585,16 @@ internal sealed class OverviewForm : Form
             };
             iconBox.Disposed += (_, _) => iconImage.Dispose();
             chip.Controls.Add(iconBox);
-            textX = 64;
+            textX = ScalePx(52);
         }
 
         var titleLbl = new Label
         {
             Text = win.Title,
             ForeColor = Color.FromArgb(225, 225, 235),
-            Font = UiFont(10.8f),
+            Font = UiFont(8.8f),
             Location = new Point(textX, 0),
-            Size = new Size(chip.Width - textX - 6, chip.Height),
+            Size = new Size(chip.Width - textX - ScalePx(6), chip.Height),
             TextAlign = ContentAlignment.MiddleLeft,
             AutoEllipsis = true,
             BackColor = Color.Transparent,
@@ -494,7 +638,7 @@ internal sealed class OverviewForm : Form
         foreach (var mon in _mgr.GetLayout())
             foreach (var desk in mon.Desktops)
             {
-                string label = L.F("ov.menu.move", mon.Ordinal, desk.GlobalNumber) +
+                string label = L.F("ov.menu.move", mon.Ordinal, desk.LocalIndex + 1) +
                                (desk.IsCurrent ? L.T("ov.menu.activeSuffix") : "");
                 var (device, local) = (mon.Device, desk.LocalIndex);
                 menu.Items.Add(label, null, (_, _) =>
@@ -518,9 +662,9 @@ internal sealed class OverviewForm : Form
     {
         var card = new BufferedPanel
         {
-            Size = new Size(AddCardWidth, DesktopCardSize.Height),
+            Size = new Size(_addCardWidth, _desktopCardSize.Height),
             BackColor = BgColor,
-            Margin = new Padding(7),
+            Margin = new Padding(ScalePx(7)),
             AllowDrop = true,
             Cursor = Cursors.Hand
         };
@@ -597,6 +741,13 @@ internal sealed class OverviewForm : Form
             _keepOpenOnDeactivate = false;
         }));
     }
+
+    private int ScalePx(int value) => (int)Math.Round(value * _layoutScale);
+
+    private Size ScaleSize(Size size) => new(ScalePx(size.Width), ScalePx(size.Height));
+
+    private Padding ScalePadding(int left, int top, int right, int bottom) =>
+        new(ScalePx(left), ScalePx(top), ScalePx(right), ScalePx(bottom));
 
     private static Font UiFont(float size, FontStyle style = FontStyle.Regular)
     {
