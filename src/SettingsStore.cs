@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text;
 
 namespace IndepenDesk;
 
@@ -9,6 +10,7 @@ namespace IndepenDesk;
 /// </summary>
 internal static class SettingsStore
 {
+    private static readonly object Gate = new();
     private static readonly string File_ = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "IndepenDesk", "settings.json");
 
@@ -21,7 +23,10 @@ internal static class SettingsStore
                 obj[key] is JsonValue v)
                 return v.GetValue<string>();
         }
-        catch { }
+        catch (Exception ex)
+        {
+            AppLog.Error($"{nameof(GetString)}({key})", ex);
+        }
         return null;
     }
 
@@ -34,32 +39,60 @@ internal static class SettingsStore
                 obj[key] is JsonValue v)
                 return v.GetValue<bool>();
         }
-        catch { }
+        catch (Exception ex)
+        {
+            AppLog.Error($"{nameof(GetBool)}({key})", ex);
+        }
         return defaultValue;
     }
 
-    public static void SetString(string key, string value) => Set(key, JsonValue.Create(value));
+    public static bool SetString(string key, string value) => Set(key, JsonValue.Create(value));
 
-    public static void SetBool(string key, bool value) => Set(key, JsonValue.Create(value));
+    public static bool SetBool(string key, bool value) => Set(key, JsonValue.Create(value));
 
-    private static void Set(string key, JsonNode? value)
+    private static bool Set(string key, JsonNode? value)
     {
-        try
+        lock (Gate)
         {
-            JsonObject obj;
+            string tmp = File_ + $".{Environment.ProcessId}.tmp";
             try
             {
-                obj = (File.Exists(File_) ? JsonNode.Parse(File.ReadAllText(File_)) as JsonObject : null)
-                      ?? new JsonObject();
+                JsonObject obj;
+                try
+                {
+                    obj = (File.Exists(File_) ? JsonNode.Parse(File.ReadAllText(File_)) as JsonObject : null)
+                          ?? new JsonObject();
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Error(nameof(SettingsStore) + ".Parse", ex);
+                    obj = new JsonObject();
+                }
+
+                obj[key] = value;
+                Directory.CreateDirectory(Path.GetDirectoryName(File_)!);
+                string json = obj.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+                using (var stream = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None,
+                           4096, FileOptions.WriteThrough))
+                using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
+                {
+                    writer.Write(json);
+                    writer.Flush();
+                    stream.Flush(flushToDisk: true);
+                }
+
+                if (File.Exists(File_))
+                    File.Replace(tmp, File_, null, ignoreMetadataErrors: true);
+                else
+                    File.Move(tmp, File_);
+                return true;
             }
-            catch
+            catch (Exception ex)
             {
-                obj = new JsonObject();
+                AppLog.Error($"{nameof(SettingsStore)}.Set({key})", ex);
+                try { File.Delete(tmp); } catch { }
+                return false;
             }
-            obj[key] = value;
-            Directory.CreateDirectory(Path.GetDirectoryName(File_)!);
-            File.WriteAllText(File_, obj.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         }
-        catch { }
     }
 }

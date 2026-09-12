@@ -1,30 +1,35 @@
 # Dağıtım kanalları rehberi
 
 Yeni sürüm çıkarma: `IndepenDesk.csproj` içindeki `<Version>` artırılır → commit →
-`git tag vX.Y.Z && git push origin vX.Y.Z`. Release workflow'u tüm paketleri
-(zip, Inno Setup exe, MSI, MSIX) üretip GitHub Releases'a yükler. Sonrasında
+`git tag vX.Y.Z && git push origin vX.Y.Z`. Release workflow'u zip, Inno Setup
+exe ve MSI paketlerini üretip GitHub Releases'a yükler. `AppxManifest.xml`,
+sertifika ve MSIX görselleri şu anda eski, etkin olmayan varlıklardır; workflow
+MSIX üretmez. Sonrasında
 kanallar aşağıdaki gibi güncellenir.
 
-## winget (yayında)
+## winget (fork paketi yayımlandıktan sonra)
 
-Paket kimliği: `harungecit.IndepenDesk` — Inno Setup exe'lerine işaret eder.
+Fork için kullanılacak paket kimliği: `prcyangli.IndepenDesk` — Inno Setup exe'lerine
+işaret eder. Bu kimlik winget'te yayımlanmadan README'ye kurulum komutu eklenmemelidir;
+eski upstream kimliği farklı depo kodunu kurar.
 
 Her yeni sürümde tek komut:
 
 ```powershell
-wingetcreate update harungecit.IndepenDesk --version X.Y.Z --urls `
-  "https://github.com/harungecit/IndepenDesk/releases/download/vX.Y.Z/IndepenDesk-Setup-X.Y.Z-x64.exe" `
-  "https://github.com/harungecit/IndepenDesk/releases/download/vX.Y.Z/IndepenDesk-Setup-X.Y.Z-x86.exe" `
-  "https://github.com/harungecit/IndepenDesk/releases/download/vX.Y.Z/IndepenDesk-Setup-X.Y.Z-arm64.exe" `
+wingetcreate update prcyangli.IndepenDesk --version X.Y.Z --urls `
+  "https://github.com/prcyangli/IndepenDesk/releases/download/vX.Y.Z/IndepenDesk-Setup-X.Y.Z-x64.exe" `
+  "https://github.com/prcyangli/IndepenDesk/releases/download/vX.Y.Z/IndepenDesk-Setup-X.Y.Z-x86.exe" `
+  "https://github.com/prcyangli/IndepenDesk/releases/download/vX.Y.Z/IndepenDesk-Setup-X.Y.Z-arm64.exe" `
   --token (gh auth token) --submit
 ```
 
 Komut, microsoft/winget-pkgs'e PR açar; moderasyon genellikle birkaç gün sürer.
 
-## Scoop (başvuruldu — Extras bucket)
+## Scoop (fork kaydı yayımlanmadan kullanmayın)
 
-Manifest: `ScoopInstaller/Extras` deposunda `bucket/independesk.json`; taşınabilir
-zip'lere işaret eder. İlk başvuru PR'ı: https://github.com/ScoopInstaller/Extras/pull/18426
+`ScoopInstaller/Extras` içindeki mevcut `independesk` manifestinin indirme ve
+`autoupdate` URL'leri önce `prcyangli/IndepenDesk` Releases'a geçirilmelidir.
+Bu değişiklik onaylanana kadar README'de Scoop kurulumu önerilmemelidir.
 
 Manifest'te `checkver: github` + `autoupdate` tanımlı olduğundan **yeni sürümlerde
 elle işlem gerekmez**: Scoop'un Excavator botu GitHub Releases'ı görüp manifesti
@@ -32,7 +37,8 @@ kendiliğinden günceller. Tek koşul, release varlık adlarının aynı şablon
 `IndepenDesk-vX.Y.Z-win-<arch>.zip`. Şablon değişirse Extras'a manifest düzeltme
 PR'ı gerekir.
 
-Kurulum: `scoop bucket add extras` sonrası `scoop install independesk`.
+Onaylandıktan sonra kurulum: `scoop bucket add extras` ve ardından
+`scoop install independesk`.
 
 ## Chocolatey (hesap gerekiyor — paket iskeleti hazır)
 
@@ -55,7 +61,7 @@ ile otomatik). Yayınlamak için bir defalık hesap kurulumu şart:
    ```powershell
    cd packaging\choco
    choco pack
-   choco push independesk.0.4.0.nupkg --source https://push.chocolatey.org/
+   choco push independesk.0.4.1.nupkg --source https://push.chocolatey.org/
    ```
 5. **Moderasyon:** İlk paket otomatik doğrulayıcıdan (paketi sanal makinede
    kurar) ve insan moderatörden geçer; genellikle birkaç gün ile birkaç hafta

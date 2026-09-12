@@ -73,6 +73,13 @@ internal sealed class OsdForm : Form
             ClientRectangle, sf);
     }
 
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            _hideTimer.Dispose();
+        base.Dispose(disposing);
+    }
+
     private static GraphicsPath RoundedRect(Rectangle r, int radius)
     {
         int d = radius * 2;

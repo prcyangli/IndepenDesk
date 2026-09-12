@@ -11,9 +11,9 @@ Windows'un sanal masaüstleri globaldir: `Win+Ctrl+←/→` **tüm monitörleri 
 ## Özellikler
 
 - 🖥 **Monitör başına masaüstleri** — geçiş yalnızca farenin olduğu monitörü etkiler; diğerlerine dokunulmaz.
-- ➕ **Dinamik ve bağımsız masaüstü sayıları** — her monitör 1 masaüstüyle başlar; sonda sağa kaydırmak yenisini oluşturur (monitör başına en fazla 9). Boşalan sondaki masaüstleri otomatik silinir. Bir monitörde 5, diğerinde 2 masaüstü olabilir.
-- 🔢 **Global numaralandırma** — numaralar monitörler arasında devam eder (Monitör 1: 1-2-3, Monitör 2: 4-5-6). `Ctrl+Alt+rakam` o masaüstü hangi monitördeyse oraya gider.
-- 🎞 **macOS tarzı kaydırma animasyonu**, monitörün içine kırpılmış.
+- ➕ **Dinamik ve bağımsız masaüstü sayıları** — her monitör 1 masaüstüyle başlar; sonda sağa gitmek yenisini oluşturur (monitör başına en fazla 9). Bu yolla oluşan kullanılmayan masaüstleri ayrılınca temizlenir; Genel Bakış'ta eklenen boş masaüstleri elle kapatılana kadar korunur.
+- 🔢 **Global rakam kısayolları** — `Ctrl+Alt+rakam` ekran sırasına göre monitörler arasında geçer; Genel Bakış ve OSD monitör başına yerel numaralar kullanır.
+- 🔔 **Kompakt ekran göstergesi** her geçişten sonra görünür; odağı çalabilecek kaydırma animasyonu oynatılmaz.
 - 🗂 **Genel Bakış** (`Ctrl+Alt+↑`) — Mission Control benzeri ekran, sürükle-bırak: pencereleri masaüstleri ve monitörler arasında taşıyın, masaüstünü komple başka monitöre taşıyın, sağ tık taşıma menüsü.
 - 🌍 **8 dil** — English, Türkçe, Deutsch, Français, Italiano, Русский, 中文, 日本語 (otomatik algılanır, tray menüsünden değiştirilebilir).
 - 🔄 **Güncelleme denetimi** — tray menüsünden, GitHub Releases üzerinden.
@@ -24,11 +24,7 @@ Windows'un sanal masaüstleri globaldir: `Win+Ctrl+←/→` **tüm monitörleri 
 
 Windows 10 (1607+) ve Windows 11'de **x64, x86 ve ARM64** üzerinde çalışır. Tüm paketler kendi kendine yeterlidir — .NET kurulumu gerekmez.
 
-**winget:**
-
-```
-winget install harungecit.IndepenDesk
-```
+Bu fork'un paket yöneticisi kayıtları henüz yayımlanmadı. Yayımlanana kadar yalnızca aşağıdaki `prcyangli` Release dosyalarını kullanın; eski upstream winget paketi farklı kod kurar.
 
 **Kurulum sihirbazı (önerilen):** [Releases](https://github.com/prcyangli/IndepenDesk/releases) sayfasından `IndepenDesk-Setup-<sürüm>-<mimari>.exe` indirip çalıştırın — isteğe bağlı masaüstü simgesi, 7 kurulum dili.
 
@@ -48,7 +44,7 @@ Uygulama sistem tepsisinde durur (iki mavi ekran simgesi).
 | `Ctrl+Alt+1..9` | Global numaralı masaüstüne git |
 | `Ctrl+Alt+Shift+←/→` | Aktif pencereyi bitişik masaüstüne taşı ve oraya geç |
 
-Her geçişte ekranda gösterge belirir ("Masaüstü 4 — Monitör 2 • 2/3"). Tray menüsündeki **Nasıl kullanılır…** penceresinde animasyonlu hareket rehberi vardır.
+Her geçişte ekranda gösterge belirir (örneğin "Masaüstü 2"). Tray menüsündeki **Nasıl kullanılır…** penceresinde animasyonlu hareket rehberi vardır.
 
 ## Touchpad (macOS tarzı kaydırma)
 

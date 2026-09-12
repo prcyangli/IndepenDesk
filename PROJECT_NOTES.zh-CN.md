@@ -1,8 +1,8 @@
 # IndepenDesk 本地修改与审查记录
 
-更新日期：2026-09-11
+更新日期：2026-09-12
 
-本文记录基于 `main` 分支（原始基线提交 `21c9b74`）完成的本地功能修改、验证结果，以及代码审查中发现但尚未修复的问题。
+本文记录基于 `main` 分支（原始基线提交 `21c9b74`）完成的本地功能修改、代码审查结论、本轮修复状态和验证清单。
 
 ## 本次已完成修改
 
@@ -59,9 +59,9 @@
 - 更新 8 种界面语言中的“新建桌面”提示；中文总览说明同步补充重排、拖到“＋”、保持总览和关闭按钮行为。
 - 将原先硬编码为土耳其语的“程序已经运行”提示纳入 8 种语言资源；当前语言缺少键值时统一回退到英文。
 
-## 尚未修复的问题
+## 审查问题原始清单
 
-以下项目来自本次静态审查和多架构编译检查，只做了记录，尚未修改代码。
+以下项目保留首次审查时的原始表述，便于追溯问题来源；其中多项已在后文“本轮修复与验证清单”中完成，不能再将本节整体理解为“尚未修复”。
 
 ### 高优先级
 
@@ -87,22 +87,135 @@
 - README 仍写着“末尾空桌面自动删除”，与手动创建的保留空桌面行为不完全一致。
 - 设置、启动、恢复等多处异常被静默吞掉，项目没有日志文件或诊断入口。
 
+## 第二轮静态审查新发现（2026-09-12）
+
+本轮逐行通读全部 12 个源文件（约 2600 行）及 `packaging/`、`.github/workflows/`，并与上一节第一轮清单比对去重。以下问题均为第一轮未记录的新发现；行号以当前 `main`（d12c7f9）为准。
+
+### 高优先级
+
+- **总览右键菜单「转到此窗口」对非当前桌面的窗口无效。** 菜单列出的是所有桌面的窗口，但处理器只调用 `SetForegroundWindow`（`src/OverviewForm.cs:651-655`）；目标窗口处于 `SW_HIDE` 状态时该调用失败，总览关闭后无任何效果。修复：构建菜单时记录该窗口所属的显示器/桌面，先 `_mgr.SwitchTo(device, local)` 再关闭总览并聚焦目标窗口。
+- **`hidden.json` 每 600 ms 无条件全量重写。** `Sync()` 末尾总是调用 `PersistHidden()`（`src/DesktopManager.cs:222`），同步定时器每 600 ms 触发一次（`src/TrayApp.cs:56`），状态零变化时也持续写盘（理论上约 6000 次/小时），并放大第一轮"非原子写入"的风险。修复：记录上次序列化结果做脏检查，仅变化时写入；写入采用临时文件 + `File.Replace` 原子替换（可一并解决第一轮高优先级第 2 条），`RestoreAll` 删除文件后重置脏标记。
+
+### 中优先级
+
+- **总览打开期间用快捷键切换桌面，总览内容过期。** 热键在总览打开时仍生效，但同步定时器被 `if (!OverviewForm.IsOpen)` 暂停，总览又未订阅 `DesktopSwitched` 事件，卡片与窗口数据会过期，用户可能基于旧数据拖放。修复：`OverviewForm` 订阅 `_mgr.DesktopSwitched` 后 `BeginInvoke` 重建界面（需加"拖拽进行中则延后"的防重入保护），`FormClosed` 时退订。
+- **`_retainedEmptyDesktops` 一旦登记永不解除。** 通过「＋」卡片或拖窗口到「＋」创建的桌面被加入保留集（`src/DesktopManager.cs:320、335`）后，即使后来装入过窗口又变空，`PruneTrailingEmpty`（`src/DesktopManager.cs:153-162`）也永远跳过它；集合引用随操作累积。修复：向集合添加窗口时若集合原为空则解除登记，统一封装（如 `AddToSet`）供 `Sync` 收编、`MoveWindowToDesktop`、`CreateDesktopAndMoveWindow`、`DeleteDesktop` 合并等处调用。
+- **无法隐藏提权窗口（UIPI 限制，第一轮未记录的设计限制）。** 非提升进程对管理员窗口的 `ShowWindow` 被 UIPI 静默拦截，提权窗口（管理员终端、任务管理器等）会"漏"在所有桌面上；`Sync` 的不变量可自愈（窗口回到当前桌面集合，不会卡死状态），但表现为切换"失灵"。建议：隐藏后校验 `IsWindowVisible`，仍可见则从所有集合移除并一次性托盘提示；至少在 README 说明该限制。
+- **`RepositionWindow` 会短暂显示并激活隐藏的最大化窗口。** 对隐藏的最大化窗口执行 `SW_RESTORE` → `SetWindowPos` → `SW_MAXIMIZE`（`src/DesktopManager.cs:594-609`），两个 ShowWindow 命令都会激活并显示窗口，跨显示器拖动隐藏的最大化窗口时可能闪烁/抢焦点。修复：需保持隐藏的窗口改用 `GetWindowPlacement`/`SetWindowPlacement` 调整 `rcNormalPosition`（不改变可见性），仅可见窗口保留现有流程。
+- **`MoveWindowToDesktop` 不更新 `LastActive`。** 移入非当前桌面后未设置 `dst.LastActive[dstLocal] = h`（`src/DesktopManager.cs:503`；对比 `CreateDesktopAndMoveWindow` 在 347 行有设置），之后切换到该桌面时焦点落到任意窗口而非刚移入的窗口。一行修复。
+- **`RunAndRefreshOverview` 在 UI 事件处理器中 rethrow。** 拖放/点击事件中任何未预期异常被重新抛出（`src/OverviewForm.cs:732-736`）→ WinForms 未处理异常 → 崩溃对话框，同时绕过任何统一退出清理。建议 catch 后复位 `_keepOpenOnDeactivate`、写日志、不再 rethrow。
+
+### 较低优先级
+
+- **托盘图标 HICON 泄漏。** `bmp.GetHicon()` 创建的句柄从不销毁（`src/TrayApp.cs:164`，`Icon.FromHandle` 不接管所有权）。每次进程泄漏 1 个 GDI 句柄；保存句柄、退出时 `DestroyIcon` 即可。
+- **`SwitchToGlobal` 编号超界时无任何反馈**（连 OSD 都不显示，`src/DesktopManager.cs:287-293`），可顺带触发一次当前桌面 OSD 作为边界提示。
+- **显示器行宽度永远减去垂直滚动条宽度**（`src/OverviewForm.cs:182-183`），无滚动条时行偏窄，外观问题。
+- **`HelpForm` 第 38 行的 `Location` 赋值为死代码**，随后被第 48 行覆盖。
+- **`SwitchInfo` 的 `Ordinal`/`GlobalNumber`/`LocalCount` 无使用者**（OSD 改用本地编号后遗留，`src/DesktopManager.cs:6`），可清理。
+- **Chocolatey 包与 fork 指向不一致且版本滞后。** `packaging/choco/independesk.nuspec` 版本停在 0.4.0，下载 URL 指向上游 `harungecit` 的 Release（`packaging/choco/tools/chocolateyinstall.ps1:6-7`），而 `UpdateChecker`（`src/UpdateChecker.cs:10-11`）指向本 fork `prcyangli`；choco 安装的将是上游程序、应用内更新检查的是 fork，需统一指向。
+
+### 第一轮问题复核结论
+
+上一节条目经本轮逐条静态复核，除资源释放条目的具体对象需按第三轮记录进一步细化外，其余结论均属实；其中"x86 图标回退调用"可直接参照 `src/Native.cs:60-67` 现成的 `GetWindowLongPtr` 双声明模式修复。
+
+本轮额外核过、**未发现问题**的部分：`DeleteDesktop`/`MoveDesktop` 的索引与引用相等用法（含跨显示器分支）手工推演正确；`Sync` 不变量对"应用自行重新显示窗口""窗口跨显示器移动"等场景可自愈；`EnumWindows` 委托生命周期、`MONITORINFOEX` 封送尺寸（104 字节）、跨进程 `GetWindowText` 不挂起（系统缓存标题）、图标获取的 `SendMessageTimeout` 防挂、互斥体生命周期、热键 ID 注册/注销范围（1..18）均正确。
+
+## 第三轮补充审查（2026-09-12）
+
+本节保留第三轮审查当时的发现；实际修复状态以紧随其后的实施清单为准。
+
+### 高优先级补充
+
+- **窗口显示操作没有区分“由 IndepenDesk 隐藏”和“应用自己隐藏”。** `SwitchToCore`、`DeleteDesktop`、`MoveWindowToDesktop`、显示器移除和 `RestoreAll` 都可能仅凭 `!IsWindowVisible` 就重新显示窗口。应用主动最小化到托盘、隐藏辅助窗口或暂时关闭主界面后，只要 HWND 仍在桌面集合中，就可能在桌面切换或退出时被意外弹出。修复时应只恢复 `_hidden` 中明确由本程序隐藏的窗口；桌面集合只表示归属，不能表示隐藏所有权。
+- **窗口隐藏完成后才写日志，存在未记录的崩溃窗口。** `SwitchToCore` 在 `src/DesktopManager.cs:430-435` 先逐个隐藏窗口，直到 454 行才持久化 `_hidden`。即使把 `File.WriteAllText` 改成原子替换，进程在隐藏和写入之间退出仍会让窗口保持隐藏且没有恢复记录。应采用带窗口身份校验的写前日志或事务状态：先原子提交预期隐藏集合，再执行隐藏，最后提交实际结果。
+- **`ShowWindow` 的返回值语义使用错误。** 当前多个隐藏分支通过 `if (IsWindowVisible(h) && ShowWindow(h, SW_HIDE))` 判断隐藏成功，但 `ShowWindow` 返回的是调用前的可见状态，不是操作结果。尤其遇到跨权限窗口时，可能把仍然可见的窗口记入 `_hidden`。应在调用后验证 `IsWindowVisible`，并记录失败原因。
+- **会话级互斥体与用户级恢复文件可能互相冲突。** `Program.cs:10` 的命名互斥体没有 `Global\` 前缀，默认只能阻止同一 Windows 会话内的重复实例；`hidden.json` 却位于同一用户共享的 `%LocalAppData%`。远程桌面或快速用户切换时，两个实例可能同时覆盖同一文件，并用另一个会话的 HWND 做恢复。应改成带用户 SID 的全局单实例，或按会话 ID 分离恢复文件并加锁。
+
+### 中优先级补充
+
+- **桌面卡片单击切换在绝大多数可见区域不会触发。** 单击处理只绑定到卡片容器（`src/OverviewForm.cs:464`），但标题标签、窗口列表和空状态标签覆盖了卡片主体；WinForms 子控件点击不会冒泡。因此“单击切换并保持总览”主要只能在狭窄边缘触发。应把非交互子控件的单击统一转发到延迟单击处理，并在标题发生真实拖拽后取消该点击。
+- **跨显示器移动最大化窗口会破坏取消最大化后的尺寸。** `RepositionWindow` 在最大化状态下先读取 `GetWindowRect`，再执行 `SW_RESTORE`，但后续仍用之前的最大化矩形调用 `SetWindowPos`；这会覆盖窗口原本的正常位置和尺寸。应使用 `GetWindowPlacement`/`SetWindowPlacement` 映射 `rcNormalPosition`，同时解决第二轮记录的闪烁、抢焦点问题，并结合源/目标 DPI 换算。
+- **启动设置只反映期望值，不反映实际状态。** `StartupManager.Enabled` 来自 `settings.json`，设置和注册表写入异常又全部被吞掉；注册表权限失败、外部删除 Run 值或 Windows 启动审批禁用后，菜单仍可能显示“已启用”。应读取注册表和启动审批的实际状态，保存失败时恢复菜单状态并向用户报告。
+- **窗口身份问题不仅影响下次启动。** `Sync` 对已收录窗口只调用 `IsWindow`，同一运行期内旧窗口关闭后若 HWND 在下一次 600 ms 同步前被复用，新窗口可能继承旧桌面归属或 `_hidden` 状态。窗口集合和 `_hidden` 都应以复合身份而不是裸 HWND 为键。
+
+### 资源、发布和文档补充
+
+- **资源泄漏位置需要细化。** `HelpForm` 当前绘制字幕使用的 `StringFormat` 已通过 `using` 释放；实际仍明确遗漏的是 `OverviewForm.cs:685` 的“＋”卡片 `StringFormat`。此外，临时窗口右键菜单、语言切换时被替换的旧托盘菜单、`ToolTip`、OSD 定时器和动态创建的控件字体需要建立统一释放路径。
+- **发行仓库标识整体不一致。** 除 Chocolatey 外，`IndepenDesk.csproj` 的 `RepositoryUrl`、Inno Setup 的发布者/支持 URL、WiX 的帮助 URL、winget 文档和 MSIX 标识多数仍是 `harungecit`，而 README 的 Release 链接及更新检查指向 `prcyangli`。需要明确唯一发行源；原作者版权信息可保留，但下载、更新和问题反馈地址应一致。
+- **发布指南声称会生成 MSIX，但工作流已经删除该步骤。** `packaging/PUBLISHING.tr.md:5` 与当前 `.github/workflows/release.yml` 不一致；`AppxManifest.xml`、证书和 Assets 目前也没有被发布流程使用。应恢复并维护 MSIX 流程，或从发布指南中删除相关承诺并标记这些文件为停用资产。
+- **README 的 OSD 描述与实现不符。** 文档仍描述“桌面 4 — 显示器 2 • 2/3”，当前 `OsdForm` 实际只显示当前显示器内的本地桌面编号。应统一实现或同步修改所有语言 README。
+- **当前发行产物没有代码签名。** 本地检查的 x64、x86、ARM64 EXE，以及 Inno Setup EXE、MSI 均为 `NotSigned`；当前 Release workflow 也没有 EXE/MSI 签名步骤。正式发行前应增加受信任证书签名和签名验证，降低 SmartScreen 警告及企业部署阻力。
+- **更新检查的异常版本分支会给出错误结论。** `UpdateChecker` 在最新标签无法被 `Version.TryParse` 时进入“已经是最新版”分支，而不是报告无法解析。建议把“解析失败”“当前已是最新”“远端版本更旧”拆成独立结果。
+
+## 本轮修复与验证清单（2026-09-12）
+
+### 已实施
+
+- [x] 隐藏日志改为带版本的复合窗口身份：HWND、指针位数、PID、进程启动时间、Windows 会话 ID、窗口类名；恢复前全部匹配，避免句柄复用误恢复。
+- [x] 恢复日志按 Windows 会话保存为 `hidden-<sessionId>.json`；用户 SID 全局互斥体用于跨会话防重复实例，无法创建全局互斥体时回退到会话局部互斥体。旧版无身份信息的 `hidden.json` 只保留并记警告，不做不安全的自动恢复。
+- [x] 隐藏操作改为写前日志：先将预期集合以临时文件写透并原子替换，再调用 `ShowWindow(SW_HIDE)`，最后用 `IsWindowVisible` 和复合身份核验实际结果。写日志失败时不隐藏；只隐藏成功一部分时恢复本轮窗口并取消操作。
+- [x] 持久化加入规范排序和脏检查；600 ms 同步仍可运行，但隐藏集合不变时不再重写磁盘。空集合删除日志，并同步更新内存中的已持久化标记。
+- [x] 只显示 `_hidden` 中明确由 IndepenDesk 隐藏且身份仍匹配的窗口；应用自行隐藏的窗口不再因切换、拔屏或退出而被错误弹出。显示失败时保留恢复记录供后续重试。
+- [x] x86 图标回退按位数调用 `GetClassLongW`/`GetClassLongPtrW`；托盘位图产生的原生 HICON 在克隆后通过 `DestroyIcon` 释放。
+- [x] 最大化窗口跨屏移动改用 `GetWindowPlacement`/`SetWindowPlacement` 更新正常位置，隐藏窗口保持隐藏，并按源/目标显示器 DPI 映射正常尺寸；不再执行会显示并激活窗口的 restore/maximize 序列。
+- [x] `MoveWindowToDesktop` 更新目标桌面的 `LastActive`；手动创建的空桌面在装入窗口后解除永久保留标记。
+- [x] 增加 UI 线程未处理异常、主循环异常和进程级未处理异常日志；正常退出及 UI 异常路径调用 `RestoreAll`。诊断日志写入 `%LocalAppData%\IndepenDesk\IndepenDesk-session-<sessionId>.log`，达到 2 MiB 后滚动保留一份旧日志。
+- [x] 总览右键“转到此窗口”先切换到所属桌面；卡片标题、当前标记、窗口列表和空状态区域支持单击转发；真实拖拽后不误触单击。
+- [x] 总览订阅桌面切换事件并在拖拽结束后延迟刷新；UI 操作异常不再 rethrow 到 WinForms 消息循环。
+- [x] 临时窗口菜单、旧托盘菜单、托盘图标、OSD/同步/动画定时器、热键窗口句柄、总览 `ToolTip`/字体、帮助窗体字体和绘图 `StringFormat` 建立明确释放路径。
+- [x] `settings.json` 改为写透后原子替换并记录异常；开机启动菜单读取当前可执行文件对应的实际 HKCU Run 值，写入或设置保存失败时回滚勾选并提示。
+- [x] 更新检查固定查询 `prcyangli/IndepenDesk`，只允许打开该仓库的 HTTPS Release URL；无法解析版本标签时单独报错，不再误报“已经是最新版”。
+- [x] 清理 `SwitchInfo` 和 `DesktopEntry` 中不再使用的全局编号字段。
+- [x] 项目元数据、Inno/WiX URL、Chocolatey、8 种 README 和发布指南中的下载/更新来源统一为 `prcyangli/IndepenDesk`。未发布 fork 包管理器条目前，不再给出会安装上游代码的 winget 命令。
+- [x] Chocolatey 元数据和下载脚本更新到 0.4.1；x86/x64 校验值按本地 0.4.1 安装包重新计算。发布前仍须对 GitHub Release 上的最终文件复核一次。
+- [x] 8 种 README 删除已关闭的切换滑动动画宣传，说明 OSD 使用显示器内编号，并准确区分自动创建的末尾空桌面与总览手动保留的空桌面。
+
+### 已完成的静态验证
+
+- [x] `git diff --check` 通过；仅输出仓库现有的 LF/CRLF 转换提示。
+- [x] `IndepenDesk.csproj`、WiX、AppxManifest 和 Chocolatey nuspec 均可作为 XML 解析；Chocolatey PowerShell 安装脚本通过 PowerShell AST 语法解析。
+- [x] 8 种界面语言均包含 43 个有效键，无缺失、额外或重复键；格式化占位符集合与英文基准一致；已移除 OSD 改版后不再使用的 `osd.sub` 和窗口列表滚动化后不再使用的 `ov.more`。
+- [x] 仓库下载、更新、支持和源码 URL 扫描均指向 `prcyangli/IndepenDesk`；唯一剩余的 `harungecit.IndepenDesk` 是当前未参与发布流程的旧 MSIX 签名身份，原作者版权/作者字段继续保留。
+- [x] Chocolatey 脚本中的 x86/x64 SHA-256 与 `artifacts/IndepenDesk-Setup-0.4.1-*.exe` 本地文件重新计算结果一致。
+- [x] 本机 32 位 `user32.dll` 导出表确认存在 `GetClassLongW`、不存在 `GetClassLongPtrW`，与新增的位数分支一致。
+
+### 已完成的编译验证
+
+- [x] 临时使用微软官方 .NET SDK 8.0.425 对当前修改执行 `dotnet build -c Release`：0 警告、0 错误；`win-x64`、`win-x86`、`win-arm64` 三个自包含单文件 `dotnet publish` 全部成功，输出放在临时验证目录而未覆盖仓库原有发布产物。
+- [x] 对当前修改启用 `AnalysisLevel=latest-all` 和代码风格分析：0 错误、35 个警告；已消除本轮涉及的 Dispose 所有权、P/Invoke DLL 搜索路径和未检查 `GetWindowThreadProcessId` 结果警告。剩余为故障恢复边界的宽异常捕获、WinForms UI 上下文 await、StringBuilder 互操作和低影响样式/性能建议。
+
+### 仍需在隔离 Windows VM 验证
+
+- [ ] 空闲运行至少 10 分钟，用 ProcMon 确认 600 ms 同步期间 `hidden-<sessionId>.json` 在状态不变时无重复写入；切换一次只产生必要的原子替换。
+- [ ] 在“日志提交后、隐藏过程中、隐藏完成后、恢复过程中”分别强制结束进程，确认下次启动只恢复身份匹配的窗口，且显示失败的记录不会丢失。
+- [ ] 构造 PID、进程启动时间、窗口类名或会话 ID 不匹配的日志，确认 HWND 即使有效也不会被显示；旧版 `hidden.json` 保留但不会自动执行不安全恢复。
+- [ ] x86 实机检查普通窗口、无 `WM_GETICON` 响应窗口的图标回退；确认不再出现 `EntryPointNotFoundException`。
+- [ ] 将隐藏的最大化窗口跨 100%/150%/200% DPI 显示器移动，确认过程不闪烁、不抢焦点，切换过去后仍最大化，取消最大化后的正常尺寸与相对位置合理。
+- [ ] 验证移入非当前桌面的窗口成为该桌面下次切换时的焦点；验证“转到此窗口”、卡片各区域单击、双击、标题拖拽及快捷键导致的总览刷新。
+- [ ] 用管理员窗口验证隐藏失败会取消整次操作、恢复已隐藏窗口、只提示一次且日志可诊断。
+- [ ] 模拟设置目录只读和 HKCU Run 写入失败，确认设置文件不损坏、菜单勾选回滚、实际注册表状态与 UI 一致。
+- [ ] 长时间反复打开/关闭总览、帮助、窗口菜单和语言菜单，监控 GDI/User handle 与私有内存不持续增长。
+- [ ] 复核 `prcyangli` GitHub Release 上的 0.4.1 安装包实际 SHA-256，再执行 Chocolatey install/uninstall/upgrade 烟雾测试；fork 的 winget/Scoop 条目发布前不对外宣称可用。
+- [ ] 正式发布前为 EXE、安装器和 MSI 增加可信代码签名并在 CI 验证签名。
+
 ## 测试与构建记录
 
 - `git diff --check`：通过，仅有 Git 的 LF/CRLF 转换提示。
-- Release `win-x64`：编译成功，0 个普通警告，0 个错误。
-- Release `win-x86`：编译成功，0 个普通警告，0 个错误。
-- Release `win-arm64`：编译成功，0 个普通警告，0 个错误。
-- 启用全部 .NET 分析规则：0 个错误、68 个警告。多数为 P/Invoke 加固和代码风格建议，其中资源释放警告具有实际修复价值。
+- 修改前基线 Release `win-x64`：编译成功，0 个普通警告，0 个错误。
+- 修改前基线 Release `win-x86`：编译成功，0 个普通警告，0 个错误。
+- 修改前基线 Release `win-arm64`：编译成功，0 个普通警告，0 个错误。
+- 修改前基线启用全部 .NET 分析规则：0 个错误、68 个警告。多数为 P/Invoke 加固和代码风格建议，其中资源释放警告具有实际修复价值。
 - 仓库当前没有自动化测试；CI 仅执行普通 Release 编译，未覆盖桌面状态变化、跨屏拖拽、异常恢复和安装包烟雾测试。
 - 本地自包含发布文件输出到 `publish/x64/`，本地 Inno Setup 安装包输出到 `artifacts/`；两个目录均不纳入 Git 提交。
 - 本机 x64 自包含单文件发布和 Inno Setup EXE 安装包均编译成功。当前本地安装包未进行代码签名，Windows SmartScreen 可能在首次运行时提示未知发布者。
+- 第二轮审查（2026-09-12）当时为纯静态审查；本轮随后临时安装官方 .NET SDK 8.0.425，已完成当前源码的普通 Release 和三架构发布编译。
+- 第一轮记录时 8 种界面语言各包含 42 个键；本轮新增 3 个提示并删除 2 个死键后为每种 43 个，仍无重复或缺失键，格式化占位符集合与英文基准一致。
+- 本轮未直接运行应用，因为运行会接管并隐藏当前用户桌面上的真实窗口；涉及窗口状态的结论需要在隔离 Windows VM 中补充运行时验证。
 
-## 建议处理顺序
+## 后续建议处理顺序
 
-1. 加固崩溃恢复记录和统一异常退出清理。
-2. 修复 x86 `GetClassLongPtr` 回退调用。
-3. 重构窗口资格检查，减少依赖窗口类黑名单。
-4. 修复跨显示器 DPI 换算和窗口打开期间的动态 DPI 重排。
-5. 修复 UI/GDI 资源释放。
-6. 增加桌面管理单元测试、窗口过滤测试及安装包烟雾测试。
+1. 先完成上面的隔离 VM 核心回归；窗口隐藏、恢复和跨 DPI 行为在真机验证前不能视为发布就绪。
+2. 为桌面集合也维护复合窗口身份，彻底消除同一运行期内极短窗口句柄复用的残余风险；继续评估窗口资格动态变化策略。
+3. 处理总览/帮助窗口打开期间跨不同 DPI 显示器移动后的完整布局重建，并稳定总览窗口排序。
+4. 统一安装权限与开机启动作用域；若恢复 MSIX 发布，使用 `prcyangli` 的正式包身份和证书重新建立签名流程。
+5. 抽象 Win32 访问层，增加桌面状态机单元测试、恢复故障注入测试、x86/多 DPI 集成测试及安装包烟雾测试。

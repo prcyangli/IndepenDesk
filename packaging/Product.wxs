@@ -1,7 +1,7 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="IndepenDesk"
-           Manufacturer="harungecit"
+           Manufacturer="prcyangli"
            Version="$(var.MyVersion)"
            Language="1033"
            UpgradeCode="7E4B1D6A-9C2F-4E83-B5A1-2D3C4E5F6071"
@@ -16,7 +16,7 @@
 
     <Icon Id="AppIcon" SourceFile="$(var.IconPath)" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/harungecit/IndepenDesk" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/prcyangli/IndepenDesk" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER" Name="IndepenDesk">
@@ -32,7 +32,7 @@
                   Name="IndepenDesk"
                   Target="[INSTALLFOLDER]IndepenDesk.exe"
                   WorkingDirectory="INSTALLFOLDER" />
-        <RegistryValue Root="HKCU" Key="Software\harungecit\IndepenDesk"
+        <RegistryValue Root="HKCU" Key="Software\prcyangli\IndepenDesk"
                        Name="installed" Type="integer" Value="1" KeyPath="yes" />
       </Component>
       <!-- Başlangıç: uygulamanın da yönettiği HKCU Run değeri (kaldırırken silinir) -->

@@ -2,16 +2,16 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>independesk</id>
-    <version>0.4.0</version>
-    <packageSourceUrl>https://github.com/harungecit/IndepenDesk/tree/main/packaging/choco</packageSourceUrl>
-    <owners>harungecit</owners>
+    <version>0.4.1</version>
+    <packageSourceUrl>https://github.com/prcyangli/IndepenDesk/tree/main/packaging/choco</packageSourceUrl>
+    <owners>prcyangli</owners>
     <title>IndepenDesk</title>
     <authors>harungecit</authors>
-    <projectUrl>https://github.com/harungecit/IndepenDesk</projectUrl>
-    <licenseUrl>https://github.com/harungecit/IndepenDesk/blob/main/LICENSE</licenseUrl>
+    <projectUrl>https://github.com/prcyangli/IndepenDesk</projectUrl>
+    <licenseUrl>https://github.com/prcyangli/IndepenDesk/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
-    <projectSourceUrl>https://github.com/harungecit/IndepenDesk</projectSourceUrl>
-    <bugTrackerUrl>https://github.com/harungecit/IndepenDesk/issues</bugTrackerUrl>
+    <projectSourceUrl>https://github.com/prcyangli/IndepenDesk</projectSourceUrl>
+    <bugTrackerUrl>https://github.com/prcyangli/IndepenDesk/issues</bugTrackerUrl>
     <tags>independesk virtual-desktop multi-monitor desktop productivity workspace</tags>
     <summary>Independent virtual desktops per monitor for Windows</summary>
     <description>
@@ -21,13 +21,13 @@ IndepenDesk brings macOS-style "Displays have separate Spaces" behavior to Windo
 
 - Per-monitor desktops with independent, dynamic desktop counts (up to 9 per monitor)
 - Global desktop numbering with `Ctrl+Alt+1..9` jumps
-- macOS-style slide animation, clipped inside the monitor
+- Compact on-screen desktop indicator after every switch
 - Mission Control-like overview (`Ctrl+Alt+Up`) with drag and drop
 - 8 UI languages, auto-detected
 - Starts with Windows by default — can be turned off from the tray menu
 - Crash-safe: hidden windows are journaled and restored on the next start
     </description>
-    <releaseNotes>https://github.com/harungecit/IndepenDesk/releases/tag/v0.4.0</releaseNotes>
+    <releaseNotes>https://github.com/prcyangli/IndepenDesk/releases/tag/v0.4.1</releaseNotes>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />

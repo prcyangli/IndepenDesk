@@ -11,9 +11,9 @@ Virtuelle Desktops unter Windows sind global: `Win+Strg+←/→` wechselt **alle
 ## Funktionen
 
 - 🖥 **Desktops pro Monitor** — ein Wechsel betrifft nur den Monitor unter der Maus; alle anderen bleiben unberührt.
-- ➕ **Dynamische, unabhängige Desktop-Anzahl** — jeder Monitor startet mit 1 Desktop; ein Wisch nach rechts am Ende erstellt einen neuen (max. 9 pro Monitor). Leere Desktops am Ende werden automatisch entfernt.
-- 🔢 **Globale Nummerierung** — die Nummern laufen über Monitore hinweg weiter (Monitor 1: 1-2-3, Monitor 2: 4-5-6). `Strg+Alt+Ziffer` springt zum jeweiligen Desktop.
-- 🎞 **Wischanimation im macOS-Stil**, auf den Monitor begrenzt.
+- ➕ **Dynamische, unabhängige Desktop-Anzahl** — jeder Monitor startet mit 1 Desktop; rechts am Ende wird ein neuer erstellt (max. 9 pro Monitor). So automatisch erstellte, unbenutzte Desktops werden nach dem Verlassen entfernt; in der Übersicht angelegte leere Desktops bleiben bis zum manuellen Schließen erhalten.
+- 🔢 **Globale Ziffernkürzel** — `Strg+Alt+Ziffer` springt in Bildschirmreihenfolge monitorübergreifend; Übersicht und OSD verwenden lokale Nummern je Monitor.
+- 🔔 **Kompakte Bildschirmanzeige** nach jedem Wechsel, ohne fokusraubende Wischanimation.
 - 🗂 **Übersicht** (`Strg+Alt+↑`) — Mission-Control-ähnliche Ansicht mit Drag & Drop: Fenster zwischen Desktops und Monitoren verschieben, ganze Desktops auf einen anderen Monitor ziehen, Rechtsklick-Menü.
 - 🌍 **8 Sprachen** — automatisch erkannt, über das Tray-Menü änderbar.
 - 🔄 **Update-Prüfung** über GitHub Releases im Tray-Menü.
@@ -24,11 +24,7 @@ Virtuelle Desktops unter Windows sind global: `Win+Strg+←/→` wechselt **alle
 
 Läuft unter Windows 10 (1607+) und Windows 11 auf **x64, x86 und ARM64**. Alle Pakete sind eigenständig — keine .NET-Laufzeit erforderlich.
 
-**winget:**
-
-```
-winget install harungecit.IndepenDesk
-```
+Die Paketmanager-Einträge dieses Forks sind noch nicht veröffentlicht. Verwenden Sie bis dahin ausschließlich die unten verlinkten Releases von `prcyangli`; das frühere upstream-winget-Paket installiert anderen Code.
 
 **Installer (empfohlen):** `IndepenDesk-Setup-<Version>-<Arch>.exe` von den [Releases](https://github.com/prcyangli/IndepenDesk/releases) herunterladen und ausführen — mit optionalem Desktop-Symbol, in 7 Sprachen.
 
@@ -48,7 +44,7 @@ Die App sitzt im Infobereich (Symbol mit zwei blauen Bildschirmen).
 | `Strg+Alt+1..9` | Zum Desktop mit dieser globalen Nummer springen |
 | `Strg+Alt+Umschalt+←/→` | Aktives Fenster auf den Nachbar-Desktop verschieben |
 
-Bei jedem Wechsel erscheint eine Anzeige („Desktop 4 — Monitor 2 • 2/3"). Das Tray-Menü enthält eine **Bedienungsanleitung** mit animierter Gestenübersicht.
+Bei jedem Wechsel erscheint eine Anzeige (zum Beispiel „Desktop 2“). Das Tray-Menü enthält eine **Bedienungsanleitung** mit animierter Gestenübersicht.
 
 ## Touchpad (Wischgesten wie bei macOS)
 

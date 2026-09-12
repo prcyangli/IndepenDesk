@@ -12,6 +12,9 @@ internal sealed class HelpForm : Form
     private static HelpForm? _open;
     private readonly float _layoutScale;
     private readonly int _contentWidth;
+    private readonly Font _baseFont;
+    private readonly Font _headerFont;
+    private bool _resourcesDisposed;
 
     public static void ShowHelp()
     {
@@ -32,10 +35,11 @@ internal sealed class HelpForm : Form
         AutoScaleMode = AutoScaleMode.None;
         AutoScroll = true;
         var uiFontFamily = SystemFonts.MessageBoxFont?.FontFamily ?? FontFamily.GenericSansSerif;
-        Font = new Font(uiFontFamily, 9.5f);
+        _baseFont = new Font(uiFontFamily, 9.5f);
+        _headerFont = new Font(uiFontFamily, 11.5f, FontStyle.Bold);
+        Font = _baseFont;
 
         var screen = Screen.FromPoint(Cursor.Position);
-        Location = new Point(screen.WorkingArea.Left + 16, screen.WorkingArea.Top + 16);
         using (var graphics = CreateGraphics())
             _layoutScale = Math.Clamp(graphics.DpiX / 96f, 1f, 4f);
         _contentWidth = ScalePx(672);
@@ -51,7 +55,7 @@ internal sealed class HelpForm : Form
 
         int y = ScalePx(18);
         y = AddHeader(L.T("help.shortcuts.header"), y);
-        y = AddBody(L.T("help.shortcuts.body").Replace("&&", "&"), y);
+        y = AddBody(L.T("help.shortcuts.body").Replace("&&", "&", StringComparison.Ordinal), y);
 
         y = AddHeader(L.T("help.demo.header"), y);
         var demo = new GesturePanel
@@ -63,7 +67,7 @@ internal sealed class HelpForm : Form
         y += ScalePx(196);
 
         y = AddHeader(L.T("help.touchpad.header"), y);
-        y = AddBody(L.T("help.touchpad.body").Replace("&&", "&"), y);
+        y = AddBody(L.T("help.touchpad.body").Replace("&&", "&", StringComparison.Ordinal), y);
 
         var openBtn = new Button
         {
@@ -101,7 +105,7 @@ internal sealed class HelpForm : Form
         {
             Text = text,
             ForeColor = Color.FromArgb(120, 170, 235),
-            Font = new Font(Font.FontFamily, 11.5f, FontStyle.Bold),
+            Font = _headerFont,
             Location = new Point(ScalePx(22), y),
             AutoSize = true
         });
@@ -124,6 +128,17 @@ internal sealed class HelpForm : Form
 
     private int ScalePx(int value) => (int)Math.Round(value * _layoutScale);
 
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        if (disposing && !_resourcesDisposed)
+        {
+            _resourcesDisposed = true;
+            _headerFont.Dispose();
+            _baseFont.Dispose();
+        }
+    }
+
     /// <summary>Touchpad hareketlerini döngü halinde canlandıran panel:
     /// 4 parmak sağa → masaüstü kayar; sola → geri; yukarı → genel bakış ızgarası.</summary>
     private sealed class GesturePanel : Panel
@@ -145,7 +160,13 @@ internal sealed class HelpForm : Form
                 Invalidate();
             };
             _timer.Start();
-            Disposed += (_, _) => _timer.Dispose();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                _timer.Dispose();
+            base.Dispose(disposing);
         }
 
         protected override void OnPaint(PaintEventArgs e)

@@ -11,9 +11,9 @@ Windows virtual desktops are global: pressing `Win+Ctrl+←/→` switches **all 
 ## Features
 
 - 🖥 **Per-monitor desktops** — switching only affects the monitor under the mouse cursor; other monitors are untouched.
-- ➕ **Dynamic, independent desktop counts** — every monitor starts with 1 desktop; swiping right at the end creates a new one (up to 9 per monitor). Empty trailing desktops are removed automatically. One monitor can have 5 desktops while another has 2.
-- 🔢 **Global numbering** — desktop numbers continue across monitors (Monitor 1: 1-2-3, Monitor 2: 4-5-6). `Ctrl+Alt+digit` jumps to that desktop wherever it lives.
-- 🎞 **macOS-style slide animation**, clipped inside the monitor.
+- ➕ **Dynamic, independent desktop counts** — every monitor starts with 1 desktop; moving right at the end creates a new one (up to 9 per monitor). Unused desktops created this way are pruned after you leave them; empty desktops added in Overview remain until you close them.
+- 🔢 **Global number shortcuts** — `Ctrl+Alt+digit` jumps across monitors in screen order, while the Overview and OSD use clear per-monitor numbering.
+- 🔔 **Compact on-screen indicator** after every switch, without a focus-stealing slide animation.
 - 🗂 **Overview screen** (`Ctrl+Alt+↑`) — Mission Control-like grid with drag & drop: move windows between desktops and monitors, move whole desktops to another monitor, right-click move menu.
 - 🌍 **8 languages** — English, Türkçe, Deutsch, Français, Italiano, Русский, 中文, 日本語 (auto-detected, changeable from the tray menu).
 - 🔄 **Update check** from the tray menu via GitHub Releases.
@@ -24,11 +24,7 @@ Windows virtual desktops are global: pressing `Win+Ctrl+←/→` switches **all 
 
 Works on Windows 10 (1607+) and Windows 11 on **x64, x86 and ARM64**. All packages are self-contained — no .NET runtime required.
 
-**winget:**
-
-```
-winget install harungecit.IndepenDesk
-```
+The fork's package-manager listings are not published yet. Until they are, use only the `prcyangli` release assets below; the former upstream winget package installs different code.
 
 **Installer (recommended):** download `IndepenDesk-Setup-<version>-<arch>.exe` from [Releases](https://github.com/prcyangli/IndepenDesk/releases) and run it — with optional desktop icon, in 7 setup languages.
 
@@ -48,7 +44,7 @@ The app lives in the system tray (two blue screens icon).
 | `Ctrl+Alt+1..9` | Jump to the desktop with that global number |
 | `Ctrl+Alt+Shift+←/→` | Move the active window to the adjacent desktop and follow it |
 
-An on-screen indicator ("Desktop 4 — Monitor 2 • 2/3") appears on every switch. The tray menu has **How to use…** with an animated gesture guide.
+An on-screen indicator (for example, "Desktop 2") appears on every switch. The tray menu has **How to use…** with an animated gesture guide.
 
 ## Touchpad (macOS-like swipes)
 

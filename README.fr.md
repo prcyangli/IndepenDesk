@@ -11,9 +11,9 @@ Les bureaux virtuels de Windows sont globaux : `Win+Ctrl+←/→` change **tous 
 ## Fonctionnalités
 
 - 🖥 **Bureaux par moniteur** — le changement n'affecte que le moniteur sous la souris ; les autres restent intacts.
-- ➕ **Nombre de bureaux dynamique et indépendant** — chaque moniteur démarre avec 1 bureau ; un balayage vers la droite en fin de liste en crée un nouveau (jusqu'à 9 par moniteur). Les bureaux vides en fin de liste sont supprimés automatiquement.
-- 🔢 **Numérotation globale** — les numéros continuent d'un moniteur à l'autre (Moniteur 1 : 1-2-3, Moniteur 2 : 4-5-6). `Ctrl+Alt+chiffre` y accède directement.
-- 🎞 **Animation de glissement façon macOS**, limitée au moniteur.
+- ➕ **Nombre de bureaux dynamique et indépendant** — chaque moniteur démarre avec 1 bureau ; aller à droite en fin de liste en crée un nouveau (jusqu'à 9 par moniteur). Les bureaux inutilisés créés ainsi sont supprimés après les avoir quittés ; les bureaux vides ajoutés dans la vue d'ensemble restent jusqu'à leur fermeture manuelle.
+- 🔢 **Raccourcis numériques globaux** — `Ctrl+Alt+chiffre` navigue entre moniteurs dans l'ordre des écrans ; la vue d'ensemble et l'OSD utilisent une numérotation locale par moniteur.
+- 🔔 **Indicateur compact à l'écran** après chaque changement, sans animation susceptible de prendre le focus.
 - 🗂 **Vue d'ensemble** (`Ctrl+Alt+↑`) — grille façon Mission Control avec glisser-déposer : déplacez les fenêtres entre bureaux et moniteurs, déplacez un bureau entier vers un autre moniteur, menu contextuel de déplacement.
 - 🌍 **8 langues** — détection automatique, modifiable depuis le menu de la zone de notification.
 - 🔄 **Vérification des mises à jour** via GitHub Releases.
@@ -24,11 +24,7 @@ Les bureaux virtuels de Windows sont globaux : `Win+Ctrl+←/→` change **tous 
 
 Fonctionne sous Windows 10 (1607+) et Windows 11 sur **x64, x86 et ARM64**. Tous les paquets sont autonomes — aucun runtime .NET requis.
 
-**winget :**
-
-```
-winget install harungecit.IndepenDesk
-```
+Les fiches de ce fork ne sont pas encore publiées dans les gestionnaires de paquets. D'ici là, utilisez uniquement les Releases `prcyangli` ci-dessous ; l'ancien paquet winget upstream installe un autre code.
 
 **Installateur (recommandé) :** téléchargez `IndepenDesk-Setup-<version>-<arch>.exe` depuis les [Releases](https://github.com/prcyangli/IndepenDesk/releases) et exécutez-le — icône de bureau en option, 7 langues d'installation.
 
@@ -48,7 +44,7 @@ L'application réside dans la zone de notification (icône aux deux écrans bleu
 | `Ctrl+Alt+1..9` | Aller au bureau portant ce numéro global |
 | `Ctrl+Alt+Maj+←/→` | Déplacer la fenêtre active vers le bureau adjacent |
 
-Un indicateur s'affiche à chaque changement (« Bureau 4 — Moniteur 2 • 2/3 »). Le menu contient un **Mode d'emploi** avec un guide animé des gestes.
+Un indicateur s'affiche à chaque changement (par exemple « Bureau 2 »). Le menu contient un **Mode d'emploi** avec un guide animé des gestes.
 
 ## Pavé tactile (balayages façon macOS)
 

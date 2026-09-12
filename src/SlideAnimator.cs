@@ -19,10 +19,11 @@ internal sealed class SlideAnimator : IDisposable
         var screen = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == device);
         if (screen == null) return;
 
+        Bitmap? shot = null;
         try
         {
             var b = screen.Bounds;
-            var shot = new Bitmap(b.Width, b.Height);
+            shot = new Bitmap(b.Width, b.Height);
             using (var g = Graphics.FromImage(shot))
                 g.CopyFromScreen(b.Left, b.Top, 0, 0, b.Size);
 
@@ -32,10 +33,24 @@ internal sealed class SlideAnimator : IDisposable
                 if (_active.TryGetValue(device, out var o) && o == overlay)
                     _active.Remove(device);
             };
-            overlay.Show();
-            _active[device] = overlay;
+            try
+            {
+                overlay.Show();
+                _active[device] = overlay;
+                shot = null; // ownership transferred to the active overlay
+            }
+            catch
+            {
+                shot = null; // disposing the overlay also disposes its bitmap
+                overlay.Dispose();
+                throw;
+            }
         }
-        catch { /* ekran yakalama başarısızsa animasyonsuz geçilir */ }
+        catch (Exception ex)
+        {
+            shot?.Dispose();
+            AppLog.Warning(nameof(Begin), $"Screen capture failed; continuing without animation. {ex.Message}");
+        }
     }
 
     /// <summary>Geçiş tamamlanınca çağrılır: kaydırmayı başlatır.</summary>

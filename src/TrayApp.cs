@@ -9,14 +9,17 @@ internal sealed class TrayApp : ApplicationContext
     private const int HkMoveNext = 4;
     private const int HkOverview = 5;
     private const int HkDesktopBase = 10; // 10..18 => global masaüstü 1..9
-    private static readonly bool EnableAnimations = false;
+    private static bool EnableAnimations => false;
 
     private readonly DesktopManager _manager = new();
     private readonly NotifyIcon _tray;
+    private readonly Icon _trayIcon;
     private readonly OsdForm _osd = new();
     private readonly SlideAnimator _animator = new();
     private readonly HotkeyWindow _hotkeys;
     private readonly System.Windows.Forms.Timer _syncTimer = new() { Interval = 600 };
+    private bool _exiting;
+    private bool _resourcesDisposed;
 
     public TrayApp()
     {
@@ -25,9 +28,10 @@ internal sealed class TrayApp : ApplicationContext
         StartupManager.ApplyOnLaunch();
 #endif
 
+        _trayIcon = CreateIcon();
         _tray = new NotifyIcon
         {
-            Icon = CreateIcon(),
+            Icon = _trayIcon,
             Visible = true
         };
         _tray.DoubleClick += (_, _) => OverviewForm.Toggle(_manager);
@@ -45,6 +49,8 @@ internal sealed class TrayApp : ApplicationContext
                 _animator.Commit(info.Device);
             _osd.ShowSwitch(info);
         };
+        _manager.WindowControlFailed += () =>
+            _tray.ShowBalloonTip(5000, "IndepenDesk", L.T("msg.windowControlFail"), ToolTipIcon.Warning);
 
         RegisterHotkeys();
 
@@ -95,9 +101,17 @@ internal sealed class TrayApp : ApplicationContext
         }
         else
         {
-            startupItem.Checked = StartupManager.Enabled;
+            startupItem.Checked = StartupManager.IsRegistered();
             startupItem.CheckOnClick = true;
-            startupItem.CheckedChanged += (_, _) => StartupManager.SetEnabled(startupItem.Checked);
+            bool restoringState = false;
+            startupItem.CheckedChanged += (_, _) =>
+            {
+                if (restoringState || StartupManager.SetEnabled(startupItem.Checked)) return;
+                restoringState = true;
+                startupItem.Checked = StartupManager.IsRegistered();
+                restoringState = false;
+                _tray.ShowBalloonTip(4000, "IndepenDesk", L.T("msg.startupFail"), ToolTipIcon.Warning);
+            };
         }
         menu.Items.Add(startupItem);
 
@@ -106,7 +120,15 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(L.T("menu.exit"), null, (_, _) => ExitThread());
 
+        var oldMenu = _tray.ContextMenuStrip;
         _tray.ContextMenuStrip = menu;
+        if (oldMenu != null)
+        {
+            if (oldMenu.Visible)
+                oldMenu.Closed += (_, _) => oldMenu.Dispose();
+            else
+                oldMenu.Dispose();
+        }
     }
 
     private static string Truncate(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "…";
@@ -161,20 +183,69 @@ internal sealed class TrayApp : ApplicationContext
             g.FillRectangle(b1, 2, 6, 13, 20);
             g.FillRectangle(b2, 17, 6, 13, 20);
         }
-        return Icon.FromHandle(bmp.GetHicon());
+        IntPtr hIcon = bmp.GetHicon();
+        try
+        {
+            return (Icon)Icon.FromHandle(hIcon).Clone();
+        }
+        finally
+        {
+            Native.DestroyIcon(hIcon);
+        }
+    }
+
+    internal void EmergencyRestore()
+    {
+        try
+        {
+            _manager.RestoreAll();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error(nameof(EmergencyRestore), ex);
+        }
     }
 
     protected override void ExitThreadCore()
     {
+        if (_exiting) return;
+        _exiting = true;
+        EmergencyRestore();
+        DisposeResources();
+        base.ExitThreadCore();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            if (!_exiting)
+            {
+                _exiting = true;
+                EmergencyRestore();
+            }
+            DisposeResources();
+        }
+        base.Dispose(disposing);
+    }
+
+    private void DisposeResources()
+    {
+        if (_resourcesDisposed) return;
+        _resourcesDisposed = true;
         _syncTimer.Stop();
         for (int id = 1; id < HkDesktopBase + 9; id++)
             Native.UnregisterHotKey(_hotkeys.Handle, id);
-        _manager.RestoreAll();
         _animator.Dispose();
+        var menu = _tray.ContextMenuStrip;
+        _tray.ContextMenuStrip = null;
         _tray.Visible = false;
         _tray.Dispose();
+        menu?.Dispose();
+        _trayIcon.Dispose();
         _osd.Dispose();
-        base.ExitThreadCore();
+        _syncTimer.Dispose();
+        _hotkeys.Dispose();
     }
 
     private sealed class WindowWrapper : IWin32Window
@@ -184,7 +255,7 @@ internal sealed class TrayApp : ApplicationContext
     }
 
     /// <summary>WM_HOTKEY mesajlarını almak için görünmez pencere.</summary>
-    private sealed class HotkeyWindow : NativeWindow
+    private sealed class HotkeyWindow : NativeWindow, IDisposable
     {
         private readonly Action<int> _onHotkey;
 
@@ -200,5 +271,7 @@ internal sealed class TrayApp : ApplicationContext
                 _onHotkey(m.WParam.ToInt32());
             base.WndProc(ref m);
         }
+
+        public void Dispose() => DestroyHandle();
     }
 }

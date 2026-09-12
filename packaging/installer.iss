@@ -12,9 +12,9 @@
 AppId={{9D3C7A52-3F4B-4C61-8E2A-1B5D6F7A8C90}
 AppName=IndepenDesk
 AppVersion={#MyVersion}
-AppPublisher=harungecit
-AppPublisherURL=https://github.com/harungecit/IndepenDesk
-AppSupportURL=https://github.com/harungecit/IndepenDesk/issues
+AppPublisher=prcyangli
+AppPublisherURL=https://github.com/prcyangli/IndepenDesk
+AppSupportURL=https://github.com/prcyangli/IndepenDesk/issues
 DefaultDirName={autopf}\IndepenDesk
 DisableProgramGroupPage=yes
 OutputBaseFilename=IndepenDesk-Setup-{#MyVersion}-{#Arch}

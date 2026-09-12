@@ -20,30 +20,72 @@ internal static class StartupManager
 
     /// <summary>Uygulama açılışında çağrılır: tercih neyse kayıt defterini ona eşitler
     /// (exe taşınmışsa yol da tazelenir).</summary>
-    public static void ApplyOnLaunch()
+    public static bool ApplyOnLaunch()
     {
-        if (!IsPackaged)
-            Apply();
+        return IsPackaged || Apply(Enabled);
     }
 
-    public static void SetEnabled(bool enabled)
+    public static bool SetEnabled(bool enabled)
     {
+        if (IsPackaged) return false;
+
+        bool wasRegistered = IsRegistered();
+        if (!Apply(enabled)) return false;
+        if (!SettingsStore.SetBool("startup", enabled))
+        {
+            Apply(wasRegistered);
+            return false;
+        }
+
         Enabled = enabled;
-        SettingsStore.SetBool("startup", enabled);
-        Apply();
+        return true;
     }
 
-    private static void Apply()
+    public static bool IsRegistered()
+    {
+        if (IsPackaged) return false;
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(RunKey, writable: false);
+            string? actual = key?.GetValue(ValueName, null, RegistryValueOptions.DoNotExpandEnvironmentNames)
+                as string;
+            return Environment.ProcessPath is { } exe &&
+                   string.Equals(actual, $"\"{exe}\"", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error(nameof(IsRegistered), ex);
+            return false;
+        }
+    }
+
+    private static bool Apply(bool enabled)
     {
         try
         {
+            if (enabled && Environment.ProcessPath == null)
+            {
+                AppLog.Warning(nameof(Apply), "The executable path is unavailable.");
+                return false;
+            }
+
             using var key = Registry.CurrentUser.CreateSubKey(RunKey);
-            if (Enabled && Environment.ProcessPath is { } exe)
+            if (key == null)
+            {
+                AppLog.Warning(nameof(Apply), "Could not open the current-user Run key.");
+                return false;
+            }
+            if (enabled && Environment.ProcessPath is { } exe)
                 key.SetValue(ValueName, $"\"{exe}\"");
             else
                 key.DeleteValue(ValueName, throwOnMissingValue: false);
+            return IsRegistered() == enabled;
         }
-        catch { }
+        catch (Exception ex)
+        {
+            AppLog.Error(nameof(Apply), ex);
+            return false;
+        }
     }
 
     /// <summary>MSIX'te geçiş Windows Ayarları'ndan yapılır; Başlangıç sayfasını açar.</summary>
@@ -54,7 +96,10 @@ internal static class StartupManager
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
                 "ms-settings:startupapps") { UseShellExecute = true });
         }
-        catch { }
+        catch (Exception ex)
+        {
+            AppLog.Error(nameof(OpenWindowsStartupSettings), ex);
+        }
     }
 
     private static bool DetectPackaged()

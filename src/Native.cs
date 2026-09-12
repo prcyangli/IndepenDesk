@@ -1,6 +1,8 @@
 using System.Runtime.InteropServices;
 using System.Text;
 
+[assembly: DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+
 namespace IndepenDesk;
 
 internal static class Native
@@ -28,7 +30,6 @@ internal static class Native
     public const uint VK_RIGHT = 0x27;
 
     public const int SW_MAXIMIZE = 3;
-    public const int SW_RESTORE = 9;
 
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOZORDER = 0x0004;
@@ -108,12 +109,27 @@ internal static class Native
     [DllImport("user32.dll")]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
 
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam,
         uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
 
     [DllImport("user32.dll", EntryPoint = "GetClassLongPtrW")]
     private static extern IntPtr GetClassLongPtr64(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "GetClassLongW")]
+    private static extern uint GetClassLong32(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll")]
+    public static extern bool DestroyIcon(IntPtr hIcon);
+
+    [DllImport("shcore.dll")]
+    private static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
 
     [DllImport("user32.dll")]
     public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
@@ -126,6 +142,17 @@ internal static class Native
 
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct WINDOWPLACEMENT
+    {
+        public uint length;
+        public uint flags;
+        public uint showCmd;
+        public POINT ptMinPosition;
+        public POINT ptMaxPosition;
+        public RECT rcNormalPosition;
+    }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct MONITORINFOEX
@@ -143,15 +170,13 @@ internal static class Native
         int len = GetWindowTextLength(hWnd);
         if (len == 0) return string.Empty;
         var sb = new StringBuilder(len + 1);
-        GetWindowText(hWnd, sb, sb.Capacity);
-        return sb.ToString();
+        return GetWindowText(hWnd, sb, sb.Capacity) > 0 ? sb.ToString() : string.Empty;
     }
 
     public static string GetWindowClass(IntPtr hWnd)
     {
         var sb = new StringBuilder(256);
-        GetClassName(hWnd, sb, sb.Capacity);
-        return sb.ToString();
+        return GetClassName(hWnd, sb, sb.Capacity) > 0 ? sb.ToString() : string.Empty;
     }
 
     /// <summary>Fare imlecinin üzerinde bulunduğu monitörün cihaz adını döndürür (örn. \\.\DISPLAY1).</summary>
@@ -175,6 +200,20 @@ internal static class Native
         return mi.szDevice;
     }
 
+    public static uint GetEffectiveMonitorDpi(IntPtr hMonitor)
+    {
+        try
+        {
+            return hMonitor != IntPtr.Zero && GetDpiForMonitor(hMonitor, 0, out uint dpiX, out _) == 0
+                ? dpiX
+                : 96;
+        }
+        catch
+        {
+            return 96;
+        }
+    }
+
     /// <summary>Pencerenin küçük simgesini alır; yanıt vermeyen uygulamalarda takılmamak için timeout'lu.</summary>
     public static Icon? GetWindowSmallIcon(IntPtr hWnd)
     {
@@ -183,7 +222,9 @@ internal static class Native
             SendMessageTimeout(hWnd, WM_GETICON, new IntPtr(2) /* ICON_SMALL2 */, IntPtr.Zero,
                 0x0002 /* SMTO_ABORTIFHUNG */, 120, out IntPtr hIcon);
             if (hIcon == IntPtr.Zero)
-                hIcon = GetClassLongPtr64(hWnd, GCLP_HICONSM);
+                hIcon = IntPtr.Size == 8
+                    ? GetClassLongPtr64(hWnd, GCLP_HICONSM)
+                    : new IntPtr(unchecked((int)GetClassLong32(hWnd, GCLP_HICONSM)));
             if (hIcon == IntPtr.Zero) return null;
             return (Icon)Icon.FromHandle(hIcon).Clone();
         }

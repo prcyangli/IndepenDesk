@@ -14,6 +14,8 @@ internal sealed class OverviewForm : Form
 
     private readonly DesktopManager _mgr;
     private readonly ToolTip _tips = new() { InitialDelay = 400 };
+    private readonly Dictionary<(float Size, FontStyle Style), Font> _ownedFonts = new();
+    private readonly HashSet<ContextMenuStrip> _ownedMenus = new();
 
     // Renk paleti
     private static readonly Color BgColor = Color.FromArgb(23, 23, 27);
@@ -37,6 +39,10 @@ internal sealed class OverviewForm : Form
     private readonly int _windowChipSpacing;
     private readonly int _windowChipHeight;
     private bool _keepOpenOnDeactivate;
+    private bool _suppressManagerRefresh;
+    private bool _dragInProgress;
+    private bool _managerRefreshPending;
+    private bool _resourcesDisposed;
 
     private sealed record WindowDrag(IntPtr Handle);
     private sealed record DesktopDrag(string Device, int LocalIndex);
@@ -69,7 +75,7 @@ internal sealed class OverviewForm : Form
                                b.Width * 10 / 12, b.Height * 10 / 12);
 
         using (var graphics = CreateGraphics())
-        using (var windowFont = UiFont(8.8f))
+        using (var windowFont = CreateUiFont(8.8f))
         {
             // Fonts already follow PerMonitorV2. Scale fixed geometry more gently so
             // cards stay usable at 200-300% without becoming larger than the screen.
@@ -88,8 +94,24 @@ internal sealed class OverviewForm : Form
             if (!_keepOpenOnDeactivate)
                 Close();
         };
+        _mgr.DesktopSwitched += OnDesktopSwitched;
 
         BuildUi();
+    }
+
+    private void OnDesktopSwitched(SwitchInfo _)
+    {
+        if (_suppressManagerRefresh || IsDisposed || !IsHandleCreated) return;
+        if (_dragInProgress)
+        {
+            _managerRefreshPending = true;
+            return;
+        }
+        BeginInvoke((Action)(() =>
+        {
+            if (!IsDisposed && !_suppressManagerRefresh)
+                BuildUi();
+        }));
     }
 
     private void BuildUi()
@@ -304,7 +326,7 @@ internal sealed class OverviewForm : Form
             }
             else if (dropHover)
             {
-                using var hint = UiFont(11f, FontStyle.Bold);
+                using var hint = CreateUiFont(11f, FontStyle.Bold);
                 using var brush = new SolidBrush(DropAccent);
                 using var sf = new StringFormat
                 {
@@ -342,10 +364,14 @@ internal sealed class OverviewForm : Form
         };
         _tips.SetToolTip(headerLbl, L.T("ov.tip.header"));
         Point? headerDragStart = null;
+        bool headerWasDragged = false;
         headerLbl.MouseDown += (_, e) =>
         {
             if (e.Button == MouseButtons.Left)
+            {
+                headerWasDragged = false;
                 headerDragStart = e.Location;
+            }
         };
         headerLbl.MouseMove += (_, e) =>
         {
@@ -357,9 +383,16 @@ internal sealed class OverviewForm : Form
                 SystemInformation.DragSize.Height);
             if (dragBounds.Contains(e.Location)) return;
             headerDragStart = null;
-            headerLbl.DoDragDrop(new DataObject(new DesktopDrag(mon.Device, desk.LocalIndex)), DragDropEffects.Move);
+            headerWasDragged = true;
+            StartDrag(headerLbl, new DesktopDrag(mon.Device, desk.LocalIndex));
         };
         headerLbl.MouseUp += (_, _) => headerDragStart = null;
+        headerLbl.Click += (_, _) =>
+        {
+            if (!headerWasDragged)
+                QueueSingleClickSwitch();
+            headerWasDragged = false;
+        };
         headerLbl.DoubleClick += (_, _) => ActivateDesktopAndClose();
         card.Controls.Add(headerLbl);
 
@@ -415,6 +448,7 @@ internal sealed class OverviewForm : Form
                 Padding = ScalePadding(4, 1, 4, 1)
             };
             card.Controls.Add(badge);
+            badge.Click += (_, _) => QueueSingleClickSwitch();
             badge.Location = new Point(deleteButton.Left - badge.PreferredSize.Width - ScalePx(6), ScalePx(8));
             headerLbl.Width = Math.Max(ScalePx(80), badge.Left - headerLbl.Left - ScalePx(4));
             badge.BringToFront();
@@ -446,23 +480,28 @@ internal sealed class OverviewForm : Form
         int chipWidth = windowList.ClientSize.Width - scrollbarWidth - 2;
         foreach (var win in desk.Windows)
         {
-            var chip = BuildWindowChip(win, Point.Empty, chipWidth);
+            var chip = BuildWindowChip(win, mon.Device, desk.LocalIndex, Point.Empty, chipWidth);
             chip.Margin = new Padding(0, 0, 0, _windowChipSpacing);
             windowList.Controls.Add(chip);
         }
 
         if (desk.Windows.Count == 0)
-            windowList.Controls.Add(new Label
+        {
+            var emptyLabel = new Label
             {
                 Text = L.T("ov.empty"),
                 ForeColor = TextDim,
                 Font = UiFont(10.5f, FontStyle.Italic),
                 AutoSize = true,
                 BackColor = Color.Transparent
-            });
+            };
+            emptyLabel.Click += (_, _) => QueueSingleClickSwitch();
+            windowList.Controls.Add(emptyLabel);
+        }
 
         card.Click += (_, _) => QueueSingleClickSwitch();
         card.DoubleClick += (_, _) => ActivateDesktopAndClose();
+        windowList.Click += (_, _) => QueueSingleClickSwitch();
 
         void OnDragEnter(object? sender, DragEventArgs e)
         {
@@ -535,7 +574,8 @@ internal sealed class OverviewForm : Form
 
     // ---------- pencere kutucuğu ----------
 
-    private Control BuildWindowChip(WindowEntry win, Point location, int width = 316)
+    private Control BuildWindowChip(
+        WindowEntry win, string sourceDevice, int sourceLocal, Point location, int width = 316)
     {
         var chip = new BufferedPanel
         {
@@ -556,7 +596,7 @@ internal sealed class OverviewForm : Form
         {
             Text = "⠿",
             ForeColor = TextDim,
-            Font = new Font("Segoe UI", 10f),
+            Font = UiFont(10f),
             Location = new Point(ScalePx(4), 0),
             Size = new Size(ScalePx(20), _windowChipHeight),
             TextAlign = ContentAlignment.MiddleCenter,
@@ -609,12 +649,12 @@ internal sealed class OverviewForm : Form
         void OnDown(object? s, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left)
-                chip.DoDragDrop(new DataObject(new WindowDrag(win.Handle)), DragDropEffects.Move);
+                StartDrag(chip, new WindowDrag(win.Handle));
         }
         void OnUp(object? s, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Right)
-                ShowWindowMenu(win, chip);
+                ShowWindowMenu(win, sourceDevice, sourceLocal, chip);
         }
 
         var dragControls = new List<Control> { chip, grip, titleLbl };
@@ -632,9 +672,15 @@ internal sealed class OverviewForm : Form
 
     /// <summary>Pencereye sağ tık: her monitörün her masaüstüne taşıma menüsü
     /// (görev çubuğu menüsü genişletilemediği için karşılığı burasıdır).</summary>
-    private void ShowWindowMenu(WindowEntry win, Control anchor)
+    private void ShowWindowMenu(WindowEntry win, string sourceDevice, int sourceLocal, Control anchor)
     {
         var menu = new ContextMenuStrip();
+        _ownedMenus.Add(menu);
+        menu.Closed += (_, _) =>
+        {
+            _ownedMenus.Remove(menu);
+            menu.Dispose();
+        };
         foreach (var mon in _mgr.GetLayout())
             foreach (var desk in mon.Desktops)
             {
@@ -650,10 +696,22 @@ internal sealed class OverviewForm : Form
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(L.T("ov.menu.goto"), null, (_, _) =>
         {
+            _mgr.SwitchTo(sourceDevice, sourceLocal);
             Close();
+            if (Native.IsWindow(win.Handle) && !Native.IsWindowVisible(win.Handle))
+                Native.ShowWindow(win.Handle, Native.SW_SHOWNA);
             Native.SetForegroundWindow(win.Handle);
         });
-        menu.Show(anchor, new Point(0, anchor.Height));
+        try
+        {
+            menu.Show(anchor, new Point(0, anchor.Height));
+        }
+        catch
+        {
+            _ownedMenus.Remove(menu);
+            menu.Dispose();
+            throw;
+        }
     }
 
     // ---------- yeni masaüstü kartı ----------
@@ -680,9 +738,13 @@ internal sealed class OverviewForm : Form
             };
             using var path = RoundedRect(new Rectangle(1, 1, card.Width - 3, card.Height - 3), 10);
             e.Graphics.DrawPath(pen, path);
-            using var font = UiFont(24f);
+            using var font = CreateUiFont(24f);
             using var brush = new SolidBrush(hover || dropHover ? highlight : TextDim);
-            var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            using var sf = new StringFormat
+            {
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center
+            };
             e.Graphics.DrawString("+", font, brush, card.ClientRectangle, sf);
         };
         _tips.SetToolTip(card, L.T("ov.tip.add"));
@@ -724,17 +786,23 @@ internal sealed class OverviewForm : Form
     private void RunAndRefreshOverview(Action action)
     {
         _keepOpenOnDeactivate = true;
+        _suppressManagerRefresh = true;
         try
         {
             action();
             BuildUi();
         }
-        catch
+        catch (Exception ex)
         {
-            _keepOpenOnDeactivate = false;
-            throw;
+            AppLog.Error(nameof(RunAndRefreshOverview), ex);
         }
-        BeginInvoke((Action)(() =>
+        finally
+        {
+            _suppressManagerRefresh = false;
+        }
+
+        if (!IsDisposed && IsHandleCreated)
+            BeginInvoke((Action)(() =>
         {
             if (IsDisposed) return;
             Activate();
@@ -749,7 +817,40 @@ internal sealed class OverviewForm : Form
     private Padding ScalePadding(int left, int top, int right, int bottom) =>
         new(ScalePx(left), ScalePx(top), ScalePx(right), ScalePx(bottom));
 
-    private static Font UiFont(float size, FontStyle style = FontStyle.Regular)
+    private void StartDrag(Control source, object payload)
+    {
+        _dragInProgress = true;
+        try
+        {
+            source.DoDragDrop(new DataObject(payload), DragDropEffects.Move);
+        }
+        finally
+        {
+            _dragInProgress = false;
+            if (_managerRefreshPending && !IsDisposed && IsHandleCreated)
+            {
+                _managerRefreshPending = false;
+                BeginInvoke((Action)(() =>
+                {
+                    if (!IsDisposed)
+                        BuildUi();
+                }));
+            }
+        }
+    }
+
+    private Font UiFont(float size, FontStyle style = FontStyle.Regular)
+    {
+        var key = (size, style);
+        if (!_ownedFonts.TryGetValue(key, out var font))
+        {
+            font = CreateUiFont(size, style);
+            _ownedFonts[key] = font;
+        }
+        return font;
+    }
+
+    private static Font CreateUiFont(float size, FontStyle style = FontStyle.Regular)
     {
         var family = SystemFonts.MessageBoxFont?.FontFamily ?? FontFamily.GenericSansSerif;
         return new Font(family, size, style, GraphicsUnit.Point);
@@ -765,6 +866,26 @@ internal sealed class OverviewForm : Form
         path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
         path.CloseFigure();
         return path;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && !_resourcesDisposed)
+        {
+            _resourcesDisposed = true;
+            _mgr.DesktopSwitched -= OnDesktopSwitched;
+            foreach (ContextMenuStrip menu in _ownedMenus.ToList())
+                menu.Dispose();
+            _ownedMenus.Clear();
+            _tips.Dispose();
+        }
+        base.Dispose(disposing);
+        if (disposing && _resourcesDisposed)
+        {
+            foreach (Font font in _ownedFonts.Values)
+                font.Dispose();
+            _ownedFonts.Clear();
+        }
     }
 
     private sealed class BufferedPanel : Panel
