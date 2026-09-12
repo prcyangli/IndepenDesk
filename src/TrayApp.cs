@@ -17,11 +17,12 @@ internal sealed class TrayApp : ApplicationContext
     private readonly OsdForm _osd = new();
     private readonly SlideAnimator _animator = new();
     private readonly HotkeyWindow _hotkeys;
-    private readonly System.Windows.Forms.Timer _syncTimer = new() { Interval = 600 };
+    private readonly System.Windows.Forms.Timer _syncTimer = new() { Interval = 1000 };
     private Native.WinEventDelegate? _foregroundProc;
     private IntPtr _foregroundHook;
     private bool _exiting;
     private bool _resourcesDisposed;
+    private int _idleSyncPasses;
 
     public TrayApp()
     {
@@ -72,7 +73,7 @@ internal sealed class TrayApp : ApplicationContext
         // Debug builds are used for local UI verification, so show the overview immediately.
         OverviewForm.Toggle(_manager);
 #endif
-        _syncTimer.Tick += (_, _) => { if (!OverviewForm.IsOpen) _manager.Sync(); };
+        _syncTimer.Tick += (_, _) => OnSyncTick();
         _syncTimer.Start();
     }
 
@@ -99,11 +100,16 @@ internal sealed class TrayApp : ApplicationContext
         sharedItem.CheckedChanged += (_, _) =>
         {
             if (sharedRestoring) return;
-            if (_manager.SetSharedTaskbarMode(sharedItem.Checked))
+            bool previousMode = _manager.SharedTaskbar;
+            bool requestedMode = sharedItem.Checked;
+            if (_manager.SetSharedTaskbarMode(requestedMode) &&
+                SettingsStore.SetBool("sharedTaskbar", requestedMode))
             {
-                SettingsStore.SetBool("sharedTaskbar", sharedItem.Checked);
                 return;
             }
+
+            if (_manager.SharedTaskbar != previousMode)
+                _manager.SetSharedTaskbarMode(previousMode);
             sharedRestoring = true;
             sharedItem.Checked = _manager.SharedTaskbar;
             sharedRestoring = false;
@@ -167,6 +173,34 @@ internal sealed class TrayApp : ApplicationContext
     }
 
     private static string Truncate(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "…";
+
+    private void OnSyncTick()
+    {
+        if (OverviewForm.IsOpen) return;
+        try
+        {
+            if (_manager.Sync())
+            {
+                _idleSyncPasses = 0;
+                _syncTimer.Interval = 1000;
+                return;
+            }
+
+            _idleSyncPasses++;
+            _syncTimer.Interval = _idleSyncPasses switch
+            {
+                >= 12 => 15000,
+                >= 4 => 5000,
+                _ => 2000
+            };
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error(nameof(OnSyncTick), ex);
+            _idleSyncPasses = 0;
+            _syncTimer.Interval = 5000;
+        }
+    }
 
     private void OnForegroundEvent(IntPtr hook, uint eventType, IntPtr hwnd, int idObject,
         int idChild, uint thread, uint time)

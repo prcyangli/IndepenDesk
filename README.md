@@ -65,7 +65,7 @@ The optional **shared taskbar** mode (tray menu) parks windows of inactive deskt
 ## Known limitations
 
 - Windows of elevated (admin) apps cannot be hidden unless IndepenDesk itself runs as admin.
-- In shared-taskbar mode, parked windows keep rendering (slightly higher GPU/CPU use than hiding). If the app is killed in this mode, start IndepenDesk 0.4.3+ again to bring parked windows back on-screen (older versions cannot read the new journal format).
+- In shared-taskbar mode, parked windows keep rendering (slightly higher GPU/CPU use than hiding). If the app is killed in this mode, start IndepenDesk 0.4.4+ again to bring parked windows back on-screen (earlier versions cannot read the v3 journal format).
 - The native `Win+Ctrl+←/→` still triggers Windows' global switch — simply don't use it.
 - `Ctrl+Alt+←/→` may clash with Intel graphics "rotate screen" hotkeys; disable those in the Intel graphics settings if needed (a tray notification tells you when registration fails).
 - Windows 11's taskbar context menu cannot be extended by third-party apps; use the Overview's right-click menu instead.

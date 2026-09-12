@@ -116,6 +116,10 @@ internal sealed class OverviewForm : Form
 
     private void BuildUi()
     {
+        // ToolTip keeps strong references to associated controls even after the
+        // controls are disposed. A rebuild must detach the old tree first or an
+        // overview left open while repeatedly moving windows grows indefinitely.
+        _tips.RemoveAll();
         foreach (Control control in Controls.Cast<Control>().ToArray())
             control.Dispose();
 
@@ -852,8 +856,9 @@ internal sealed class OverviewForm : Form
 
     private static Font CreateUiFont(float size, FontStyle style = FontStyle.Regular)
     {
-        var family = SystemFonts.MessageBoxFont?.FontFamily ?? FontFamily.GenericSansSerif;
-        return new Font(family, size, style, GraphicsUnit.Point);
+        using Font? systemFont = SystemFonts.MessageBoxFont;
+        string familyName = systemFont?.Name ?? FontFamily.GenericSansSerif.Name;
+        return new Font(familyName, size, style, GraphicsUnit.Point);
     }
 
     private static GraphicsPath RoundedRect(Rectangle r, int radius)

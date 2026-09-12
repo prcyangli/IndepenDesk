@@ -52,7 +52,11 @@ internal sealed class DesktopManager
         int PointerSize,
         IReadOnlyList<HiddenWindowRecord> Windows);
 
-    private const int HiddenStateVersion = 2;
+    private readonly record struct ObservedProcessIdentity(
+        long ProcessStartTimeUtcTicks,
+        int SessionId);
+
+    private const int HiddenStateVersion = 3;
     private const string EmptyPersistedState = "<empty>";
 
     private readonly Dictionary<string, MonitorState> _monitors = new();
@@ -62,6 +66,10 @@ internal sealed class DesktopManager
     private readonly int _sessionId = GetCurrentSessionId();
     private readonly string _stateFile;
     private string? _lastPersisted;
+    private long _hiddenVersion;
+    private long _persistedHiddenVersion = -1;
+    private readonly Dictionary<uint, ObservedProcessIdentity?> _syncProcessIdentities = new();
+    private bool _syncInProgress;
     private bool _windowControlWarningRaised;
     private bool _stateFileBlocked;
     private bool _switchInProgress;
@@ -114,11 +122,12 @@ internal sealed class DesktopManager
             if (!File.Exists(_stateFile))
             {
                 _lastPersisted = EmptyPersistedState;
+                _persistedHiddenVersion = _hiddenVersion;
                 return;
             }
 
             var state = JsonSerializer.Deserialize<HiddenStateFile>(File.ReadAllText(_stateFile));
-            if (state == null || (state.Version != HiddenStateVersion && state.Version != 1) ||
+            if (state == null || state.Version is < 1 or > HiddenStateVersion ||
                 state.SessionId != _sessionId || state.PointerSize != IntPtr.Size)
             {
                 AppLog.Warning(nameof(RecoverPreviousSession),
@@ -131,26 +140,11 @@ internal sealed class DesktopManager
             {
                 if (!TryGetHandle(record, out IntPtr hwnd) || !MatchesWindowIdentity(hwnd, record))
                     continue;
-                if (record.Parked)
+                SetHiddenRecord(hwnd, record);
+                if (!ShowOrUnparkManagedWindow(hwnd))
                 {
-                    // Shared-taskbar mode parked this window off-screen; put it back.
-                    if (!RestoreParkedWindow(hwnd, record))
-                    {
-                        _hidden[hwnd] = record;
-                        AppLog.Warning(nameof(RecoverPreviousSession),
-                            $"Could not restore parked HWND={hwnd}; keeping it in the recovery journal.");
-                    }
-                    continue;
-                }
-                if (!Native.IsWindowVisible(hwnd))
-                {
-                    Native.ShowWindow(hwnd, Native.SW_SHOWNA);
-                    if (!Native.IsWindowVisible(hwnd))
-                    {
-                        _hidden[hwnd] = record;
-                        AppLog.Warning(nameof(RecoverPreviousSession),
-                            $"Could not restore HWND={hwnd}; keeping it in the recovery journal.");
-                    }
+                    AppLog.Warning(nameof(RecoverPreviousSession),
+                        $"Could not restore HWND={hwnd}; keeping it in the recovery journal.");
                 }
             }
             _lastPersisted = null;
@@ -170,6 +164,7 @@ internal sealed class DesktopManager
             if (File.Exists(_stateFile))
                 File.Move(_stateFile, _stateFile + $".{reason}", overwrite: true);
             _lastPersisted = EmptyPersistedState;
+            _persistedHiddenVersion = _hiddenVersion;
         }
         catch (Exception ex)
         {
@@ -181,7 +176,27 @@ internal sealed class DesktopManager
         }
     }
 
-    private bool PersistHidden() => PersistHiddenSnapshot(_hidden.Values);
+    private bool PersistHidden()
+    {
+        if (_hiddenVersion == _persistedHiddenVersion) return true;
+        if (!PersistHiddenSnapshot(_hidden.Values)) return false;
+        _persistedHiddenVersion = _hiddenVersion;
+        return true;
+    }
+
+    private void SetHiddenRecord(IntPtr h, HiddenWindowRecord record)
+    {
+        if (_hidden.TryGetValue(h, out var existing) && existing == record) return;
+        _hidden[h] = record;
+        _hiddenVersion++;
+    }
+
+    private bool RemoveHiddenRecord(IntPtr h)
+    {
+        if (!_hidden.Remove(h)) return false;
+        _hiddenVersion++;
+        return true;
+    }
 
     private bool PersistHiddenSnapshot(IEnumerable<HiddenWindowRecord> records)
     {
@@ -261,6 +276,18 @@ internal sealed class DesktopManager
             if (Native.GetWindowThreadProcessId(h, out uint verifiedPid) == 0 ||
                 verifiedPid != pid || !Native.IsWindow(h)) return false;
 
+            var placement = new Native.WINDOWPLACEMENT
+            {
+                length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>()
+            };
+            bool hasPlacement = Native.GetWindowPlacement(h, ref placement);
+            Rectangle normal = hasPlacement
+                ? FromRECT(placement.rcNormalPosition)
+                : Native.GetWindowRect(h, out var rect)
+                    ? FromRECT(rect)
+                    : Rectangle.Empty;
+            string? monitor = Native.GetMonitorDeviceOfWindow(h);
+
             record = new HiddenWindowRecord(
                 h.ToInt64(),
                 IntPtr.Size,
@@ -269,12 +296,12 @@ internal sealed class DesktopManager
                 process.SessionId,
                 className,
                 Parked: false,
-                NormalLeft: 0,
-                NormalTop: 0,
-                NormalRight: 0,
-                NormalBottom: 0,
-                SavedShowCmd: 0,
-                ParkMonitor: null);
+                NormalLeft: normal.Left,
+                NormalTop: normal.Top,
+                NormalRight: normal.Right,
+                NormalBottom: normal.Bottom,
+                SavedShowCmd: hasPlacement ? (int)placement.showCmd : 0,
+                ParkMonitor: monitor);
             return true;
         }
         catch (Exception ex)
@@ -299,7 +326,7 @@ internal sealed class DesktopManager
         }
     }
 
-    private static bool MatchesWindowIdentity(IntPtr h, HiddenWindowRecord record)
+    private bool MatchesWindowIdentity(IntPtr h, HiddenWindowRecord record)
     {
         try
         {
@@ -307,12 +334,28 @@ internal sealed class DesktopManager
                 return false;
             if (Native.GetWindowThreadProcessId(h, out uint pid) == 0 ||
                 pid != record.ProcessId) return false;
+
+            ObservedProcessIdentity? identity;
+            if (_syncInProgress && _syncProcessIdentities.TryGetValue(pid, out identity))
+            {
+                return identity is { } cached && cached.SessionId == record.SessionId &&
+                       cached.ProcessStartTimeUtcTicks == record.ProcessStartTimeUtcTicks;
+            }
+
             using var process = Process.GetProcessById(checked((int)pid));
-            return process.SessionId == record.SessionId &&
-                   process.StartTime.ToUniversalTime().Ticks == record.ProcessStartTimeUtcTicks;
+            identity = new ObservedProcessIdentity(
+                process.StartTime.ToUniversalTime().Ticks,
+                process.SessionId);
+            if (_syncInProgress)
+                _syncProcessIdentities[pid] = identity;
+            return identity.Value.SessionId == record.SessionId &&
+                   identity.Value.ProcessStartTimeUtcTicks == record.ProcessStartTimeUtcTicks;
         }
         catch
         {
+            if (_syncInProgress &&
+                Native.GetWindowThreadProcessId(h, out uint failedPid) != 0 && failedPid != 0)
+                _syncProcessIdentities[failedPid] = null;
             return false;
         }
     }
@@ -328,6 +371,15 @@ internal sealed class DesktopManager
         foreach (IntPtr h in handles.Distinct())
         {
             if (!Native.IsWindow(h) || !Native.IsWindowVisible(h)) continue;
+            // A failed mode rollback can leave an off-screen parking record that
+            // still contains the only safe restore geometry. Preserve that record
+            // when converting the window to ordinary hidden-mode visibility.
+            if (_hidden.TryGetValue(h, out var parked) && parked.Parked &&
+                MatchesWindowIdentity(h, parked))
+            {
+                candidates.Add((h, parked));
+                continue;
+            }
             if (!TryCaptureWindowIdentity(h, out var record))
             {
                 AppLog.Warning(nameof(HideManagedWindows),
@@ -361,7 +413,7 @@ internal sealed class DesktopManager
             if (!Native.IsWindowVisible(candidate.Handle) &&
                 MatchesWindowIdentity(candidate.Handle, candidate.Record))
             {
-                _hidden[candidate.Handle] = candidate.Record;
+                SetHiddenRecord(candidate.Handle, candidate.Record);
             }
             else
             {
@@ -381,7 +433,7 @@ internal sealed class DesktopManager
         // Restore every window hidden by this attempt and leave recovery records
         // behind for any window that cannot be shown again.
         foreach (var candidate in candidates)
-            ShowManagedWindow(candidate.Handle);
+            ShowOrUnparkManagedWindow(candidate.Handle);
         PersistHidden();
         return false;
     }
@@ -398,7 +450,14 @@ internal sealed class DesktopManager
         if (!_hidden.TryGetValue(h, out var record)) return false;
         if (!MatchesWindowIdentity(h, record))
         {
-            _hidden.Remove(h);
+            RemoveHiddenRecord(h);
+            return false;
+        }
+        if (HasSavedPlacement(record) && IsWindowOffScreen(h) &&
+            !RestoreParkedWindow(h, record))
+        {
+            AppLog.Warning(nameof(ShowManagedWindow),
+                $"Could not move HWND={h} from a disconnected display.");
             return false;
         }
         if (!Native.IsWindowVisible(h))
@@ -410,7 +469,7 @@ internal sealed class DesktopManager
                 return false;
             }
         }
-        _hidden.Remove(h);
+        RemoveHiddenRecord(h);
         return true;
     }
 
@@ -426,6 +485,9 @@ internal sealed class DesktopManager
         Right = r.Right,
         Bottom = r.Bottom
     };
+
+    private static bool HasSavedPlacement(HiddenWindowRecord record) =>
+        record.NormalRight > record.NormalLeft && record.NormalBottom > record.NormalTop;
 
     private static bool IntersectsAnyScreen(Rectangle r)
     {
@@ -603,6 +665,54 @@ internal sealed class DesktopManager
                    Native.SWP_NOZORDER | Native.SWP_NOACTIVATE) && !IsWindowOffScreen(h);
     }
 
+    /// <summary>Bring a visible, unjournaled window back after its display disappears.</summary>
+    private static bool RestoreUnjournaledOffScreenWindow(IntPtr h)
+    {
+        if (!IsWindowOffScreen(h)) return true;
+
+        var placement = new Native.WINDOWPLACEMENT
+        {
+            length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>()
+        };
+        bool hasPlacement = Native.GetWindowPlacement(h, ref placement);
+        Rectangle saved;
+        if (hasPlacement)
+            saved = FromRECT(placement.rcNormalPosition);
+        else if (Native.GetWindowRect(h, out var rect))
+            saved = FromRECT(rect);
+        else
+            return false;
+
+        if (saved.Width <= 0 || saved.Height <= 0) return false;
+        Screen? host = NearestScreen(saved) ?? Screen.PrimaryScreen;
+        if (host == null) return false;
+        Rectangle area = host.WorkingArea;
+        saved.Size = new Size(Math.Min(saved.Width, area.Width), Math.Min(saved.Height, area.Height));
+        saved.Location = new Point(area.Left + (area.Width - saved.Width) / 2,
+            area.Top + (area.Height - saved.Height) / 2);
+
+        if (Native.IsIconic(h))
+        {
+            if (!hasPlacement) return false;
+            placement.showCmd = Native.SW_SHOWMINIMIZED;
+            placement.rcNormalPosition = ToRECT(saved);
+            return Native.SetWindowPlacement(h, ref placement) && !IsWindowOffScreen(h);
+        }
+
+        if (Native.IsZoomed(h) && hasPlacement)
+        {
+            if (!Native.SetWindowPos(h, IntPtr.Zero, area.X, area.Y, area.Width, area.Height,
+                    Native.SWP_NOZORDER | Native.SWP_NOACTIVATE))
+                return false;
+            placement.showCmd = Native.SW_SHOWMAXIMIZED;
+            placement.rcNormalPosition = ToRECT(saved);
+            return Native.SetWindowPlacement(h, ref placement) && !IsWindowOffScreen(h);
+        }
+
+        return Native.SetWindowPos(h, IntPtr.Zero, saved.X, saved.Y, saved.Width, saved.Height,
+                   Native.SWP_NOZORDER | Native.SWP_NOACTIVATE) && !IsWindowOffScreen(h);
+    }
+
     /// <summary>停靠事务：与 HideManagedWindows 相同的写前日志 + 全有或全无契约。</summary>
     private bool ParkManagedWindows(IEnumerable<IntPtr> handles)
     {
@@ -645,7 +755,7 @@ internal sealed class DesktopManager
             ApplyPark(c.Handle, c);
             if (IsWindowOffScreen(c.Handle) && MatchesWindowIdentity(c.Handle, c.Record))
             {
-                _hidden[c.Handle] = c.Record;
+                SetHiddenRecord(c.Handle, c.Record);
             }
             else
             {
@@ -662,7 +772,8 @@ internal sealed class DesktopManager
 
         // 不带着只停靠一半的源桌面继续切换：还原本轮停靠的窗口。
         foreach (var c in candidates)
-            RestoreParkedWindow(c.Handle, c.Record);
+            if (RestoreParkedWindow(c.Handle, c.Record))
+                RemoveHiddenRecord(c.Handle);
         PersistHidden();
         return false;
     }
@@ -674,13 +785,18 @@ internal sealed class DesktopManager
         if (!record.Parked) return ShowManagedWindow(h);
         if (!MatchesWindowIdentity(h, record))
         {
-            _hidden.Remove(h);
+            RemoveHiddenRecord(h);
             return false;
         }
         if (!IsWindowOffScreen(h))
         {
-            // 已经回到屏幕内（应用自行移动或还原）：只清理记录。
-            _hidden.Remove(h);
+            // 已经回到屏幕内（应用自行移动或还原）：确保可见后清理记录。
+            if (!Native.IsWindowVisible(h))
+            {
+                Native.ShowWindow(h, Native.SW_SHOWNA);
+                if (!Native.IsWindowVisible(h)) return false;
+            }
+            RemoveHiddenRecord(h);
             return true;
         }
         if (!RestoreParkedWindow(h, record))
@@ -688,15 +804,45 @@ internal sealed class DesktopManager
             AppLog.Warning(nameof(UnparkManagedWindow), $"Could not restore parked HWND={h}.");
             return false;
         }
-        _hidden.Remove(h);
+        if (!Native.IsWindowVisible(h))
+        {
+            Native.ShowWindow(h, Native.SW_SHOWNA);
+            if (!Native.IsWindowVisible(h))
+            {
+                AppLog.Warning(nameof(UnparkManagedWindow),
+                    $"HWND={h} was repositioned but could not be shown.");
+                return false;
+            }
+        }
+        RemoveHiddenRecord(h);
         return true;
     }
 
     private bool HideOrParkManagedWindows(IEnumerable<IntPtr> handles) =>
         SharedTaskbar ? ParkManagedWindows(handles) : HideManagedWindows(handles);
 
-    private bool ShowOrUnparkManagedWindow(IntPtr h) =>
-        SharedTaskbar ? UnparkManagedWindow(h) : ShowManagedWindow(h);
+    private bool ShowOrUnparkManagedWindow(IntPtr h)
+    {
+        if (_hidden.TryGetValue(h, out var record))
+            return record.Parked ? UnparkManagedWindow(h) : ShowManagedWindow(h);
+        return Native.IsWindow(h) && Native.IsWindowVisible(h) && !IsWindowOffScreen(h);
+    }
+
+    private bool RestoreManagedWindows(IEnumerable<IntPtr> handles)
+    {
+        bool success = true;
+        foreach (IntPtr h in handles.Distinct())
+        {
+            if (!Native.IsWindow(h)) continue;
+            if (!ShowOrUnparkManagedWindow(h))
+            {
+                AppLog.Warning(nameof(RestoreManagedWindows),
+                    $"Could not make HWND={h} accessible.");
+                success = false;
+            }
+        }
+        return success;
+    }
 
     // ---------- pencere uygunluğu ----------
 
@@ -759,22 +905,26 @@ internal sealed class DesktopManager
         st.LastActive.Add(IntPtr.Zero);
     }
 
-    private void AddWindow(HashSet<IntPtr> desktop, IntPtr h)
+    private bool AddWindow(HashSet<IntPtr> desktop, IntPtr h)
     {
-        if (desktop.Add(h))
-            _retainedEmptyDesktops.Remove(desktop);
+        if (!desktop.Add(h)) return false;
+        _retainedEmptyDesktops.Remove(desktop);
+        return true;
     }
 
     /// <summary>Aktif masaüstünün gerisindeki boş son masaüstlerini kaldırır.</summary>
-    private void PruneTrailingEmpty(MonitorState st)
+    private bool PruneTrailingEmpty(MonitorState st)
     {
+        bool changed = false;
         while (st.Desktops.Count - 1 > st.Current &&
                st.Desktops[^1].Count == 0 &&
                !_retainedEmptyDesktops.Contains(st.Desktops[^1]))
         {
             st.Desktops.RemoveAt(st.Desktops.Count - 1);
             st.LastActive.RemoveAt(st.LastActive.Count - 1);
+            changed = true;
         }
+        return changed;
     }
 
     /// <summary>
@@ -782,50 +932,97 @@ internal sealed class DesktopManager
     /// monitör değiştirenleri taşı, kaybolan monitörlerin gizli pencerelerini kurtar.
     /// Invariant: görünür bir pencere her zaman bulunduğu monitörün aktif masaüstü setindedir.
     /// </summary>
-    public void Sync()
+    public bool Sync()
     {
+        if (_syncInProgress)
+            return SyncCore();
+
+        _syncInProgress = true;
+        _syncProcessIdentities.Clear();
+        try
+        {
+            return SyncCore();
+        }
+        finally
+        {
+            _syncProcessIdentities.Clear();
+            _syncInProgress = false;
+        }
+    }
+
+    private bool SyncCore()
+    {
+        bool changed = false;
         var currentDevices = Screen.AllScreens.Select(s => s.DeviceName).ToHashSet();
 
         foreach (string dev in currentDevices)
             if (!_monitors.ContainsKey(dev))
+            {
                 _monitors[dev] = new MonitorState { Device = dev };
+                changed = true;
+            }
 
         foreach (string dev in _monitors.Keys.Where(d => !currentDevices.Contains(d)).ToList())
         {
-            foreach (var set in _monitors[dev].Desktops)
+            MonitorState removedMonitor = _monitors[dev];
+            MonitorState? fallback = _monitors.Values
+                .FirstOrDefault(m => currentDevices.Contains(m.Device));
+            var displacedWindows = new HashSet<IntPtr>();
+            foreach (var set in removedMonitor.Desktops)
             {
                 _retainedEmptyDesktops.Remove(set);
                 foreach (var h in set)
-                    ShowOrUnparkManagedWindow(h);
+                    displacedWindows.Add(h);
             }
             _monitors.Remove(dev);
+            foreach (IntPtr h in displacedWindows)
+            {
+                if (!Native.IsWindow(h))
+                {
+                    RemoveHiddenRecord(h);
+                    continue;
+                }
+
+                bool restored = ShowOrUnparkManagedWindow(h);
+                if (!restored && !_hidden.ContainsKey(h) && Native.IsWindowVisible(h))
+                    restored = RestoreUnjournaledOffScreenWindow(h);
+                if (!restored)
+                    AppLog.Warning(nameof(Sync),
+                        $"Could not restore HWND={h} after display '{dev}' was disconnected.");
+
+                if (fallback != null &&
+                    (Native.IsWindowVisible(h) || _hidden.ContainsKey(h)))
+                    AddWindow(fallback.Desktops[fallback.Current], h);
+            }
+            changed = true;
         }
 
         foreach (var st in _monitors.Values)
             foreach (var set in st.Desktops)
-                set.RemoveWhere(h =>
+                if (set.RemoveWhere(h =>
                 {
                     if (!Native.IsWindow(h))
                     {
-                        _hidden.Remove(h);
+                        RemoveHiddenRecord(h);
                         return true;
                     }
                     if (_hidden.TryGetValue(h, out var record) && !MatchesWindowIdentity(h, record))
                     {
-                        _hidden.Remove(h);
+                        RemoveHiddenRecord(h);
                         return true;
                     }
                     if (Native.IsWindowVisible(h) && !IsEligible(h))
                     {
-                        _hidden.Remove(h);
+                        RemoveHiddenRecord(h);
                         return true;
                     }
                     return false;
-                });
+                }) > 0)
+                    changed = true;
 
         foreach (var (h, record) in _hidden.ToList())
             if (!MatchesWindowIdentity(h, record))
-                _hidden.Remove(h);
+                changed |= RemoveHiddenRecord(h);
 
         foreach (var h in EnumerateTopLevelWindows())
         {
@@ -843,7 +1040,7 @@ internal sealed class DesktopManager
             // An application or the user may have shown one of our hidden windows.
             // Visible windows belong to the current desktop and must not remain in
             // the crash-recovery journal, even if already present in that set.
-            _hidden.Remove(h);
+            changed |= RemoveHiddenRecord(h);
 
             if (!st.Desktops[st.Current].Contains(h))
             {
@@ -851,15 +1048,16 @@ internal sealed class DesktopManager
                 // veya gizliyken uygulama tarafından tekrar gösterilmiş olabilir)
                 foreach (var other in _monitors.Values)
                     foreach (var set in other.Desktops)
-                        set.Remove(h);
-                AddWindow(st.Desktops[st.Current], h);
+                        changed |= set.Remove(h);
+                changed |= AddWindow(st.Desktops[st.Current], h);
             }
         }
 
         foreach (var st in _monitors.Values)
-            PruneTrailingEmpty(st);
+            changed |= PruneTrailingEmpty(st);
 
         PersistHidden();
+        return changed;
     }
 
     /// <summary>Genel bakış arayüzü için tam düzen (monitör başına yerel numaralarla).</summary>
@@ -1048,7 +1246,7 @@ internal sealed class DesktopManager
             if (!Native.IsWindow(h))
             {
                 target.Remove(h);
-                _hidden.Remove(h);
+                RemoveHiddenRecord(h);
                 continue;
             }
 
@@ -1070,8 +1268,12 @@ internal sealed class DesktopManager
     {
         if (st.Current == target)
         {
+            bool accessible = RestoreManagedWindows(st.Desktops[target]);
+            PersistHidden();
+            if (!accessible)
+                RaiseWindowControlWarning();
             DesktopSwitched?.Invoke(BuildInfo(st));
-            return true;
+            return accessible;
         }
 
         SwitchStarting?.Invoke(st.Device, st.Current, target);
@@ -1080,19 +1282,56 @@ internal sealed class DesktopManager
         if (st.Desktops[st.Current].Contains(fg))
             st.LastActive[st.Current] = fg;
 
-        if (!HideOrParkManagedWindows(st.Desktops[st.Current]))
+        int source = st.Current;
+        var sourceWindows = st.Desktops[source].ToList();
+        var targetWindows = st.Desktops[target].ToList();
+        var targetInitiallyManaged = targetWindows.Where(_hidden.ContainsKey).ToHashSet();
+        var targetSuccessfullyRestored = new List<IntPtr>();
+
+        if (!HideOrParkManagedWindows(sourceWindows))
         {
             DesktopSwitched?.Invoke(BuildInfo(st));
             return false;
         }
 
-        st.Current = target;
-
-        foreach (var h in st.Desktops[target].ToList())
+        bool targetRestored = true;
+        foreach (var h in targetWindows)
         {
             if (!Native.IsWindow(h)) { st.Desktops[target].Remove(h); continue; }
-            ShowOrUnparkManagedWindow(h);
+            if (ShowOrUnparkManagedWindow(h))
+            {
+                if (targetInitiallyManaged.Contains(h))
+                    targetSuccessfullyRestored.Add(h);
+            }
+            else
+            {
+                // An identity mismatch removes its recovery record: the HWND was
+                // reused and no longer represents the managed window. Prune that
+                // stale membership instead of failing the whole transition.
+                if (targetInitiallyManaged.Contains(h) && !_hidden.ContainsKey(h))
+                    st.Desktops[target].Remove(h);
+                else
+                    targetRestored = false;
+            }
         }
+
+        if (!targetRestored)
+        {
+            // Roll back in reverse order: hide/re-park target windows that this
+            // attempt exposed, then restore the original current desktop.
+            bool targetRolledBack = HideOrParkManagedWindows(targetSuccessfullyRestored);
+            bool sourceRolledBack = RestoreManagedWindows(sourceWindows);
+            PersistHidden();
+            if (!targetRolledBack || !sourceRolledBack)
+                AppLog.Warning(nameof(SwitchToCore),
+                    "Desktop switch rollback was incomplete; recovery records were retained.");
+            RaiseWindowControlWarning();
+            DesktopSwitched?.Invoke(BuildInfo(st));
+            return false;
+        }
+
+        // The externally visible window state is now complete; commit the model.
+        st.Current = target;
 
         // Odağı hedef masaüstünde en son aktif olan görünür pencereye ver
         IntPtr focus = st.LastActive[target];
@@ -1173,7 +1412,7 @@ internal sealed class DesktopManager
                 }
     }
 
-    /// <summary>切换共享任务栏模式。启用失败时完整回滚并返回 false；停用总是成功（可能提示提权窗口泄漏）。</summary>
+    /// <summary>事务化切换共享任务栏模式；窗口状态全部完成后才提交模式。</summary>
     public bool SetSharedTaskbarMode(bool enable)
     {
         if (enable == SharedTaskbar) return true;
@@ -1181,12 +1420,27 @@ internal sealed class DesktopManager
 
         if (enable)
         {
-            // 先把所有由本程序隐藏的窗口恢复到屏幕上（保持原位置）。
-            foreach (var h in _hidden.Where(kv => !kv.Value.Parked).Select(kv => kv.Key).ToList())
-                ShowManagedWindow(h);
+            var originallyHidden = _hidden.Where(kv => !kv.Value.Parked)
+                .Select(kv => kv.Key).ToList();
+            var restored = new List<IntPtr>();
+            bool restoreFailed = false;
+            foreach (IntPtr h in originallyHidden)
+            {
+                if (ShowManagedWindow(h))
+                    restored.Add(h);
+                else
+                    restoreFailed = true;
+            }
             PersistHidden();
 
-            SharedTaskbar = true;
+            if (restoreFailed)
+            {
+                HideManagedWindows(restored);
+                PersistHidden();
+                RaiseWindowControlWarning();
+                return false;
+            }
+
             bool failed = false;
             foreach (var st in _monitors.Values)
             {
@@ -1201,9 +1455,6 @@ internal sealed class DesktopManager
 
             if (failed)
             {
-                // 回滚：先把已停靠的窗口还原到屏幕内（否则隐藏后会在停靠区被“显示”），
-                // 再恢复隐藏模式，把非当前桌面重新隐藏。
-                SharedTaskbar = false;
                 foreach (var h in _hidden.Where(kv => kv.Value.Parked).Select(kv => kv.Key).ToList())
                     UnparkManagedWindow(h);
                 foreach (var m in _monitors.Values)
@@ -1215,22 +1466,53 @@ internal sealed class DesktopManager
                 return false;
             }
 
+            SharedTaskbar = true;
             PersistHidden();
             return true;
         }
         else
         {
-            SharedTaskbar = false;
-            foreach (var h in _hidden.Where(kv => kv.Value.Parked).Select(kv => kv.Key).ToList())
-                UnparkManagedWindow(h);
+            var originallyParked = _hidden.Where(kv => kv.Value.Parked)
+                .Select(kv => kv.Key).ToList();
+            var restored = new List<IntPtr>();
+            bool restoreFailed = false;
+            foreach (IntPtr h in originallyParked)
+            {
+                if (UnparkManagedWindow(h))
+                    restored.Add(h);
+                else
+                    restoreFailed = true;
+            }
+
+            if (restoreFailed)
+            {
+                ParkManagedWindows(restored);
+                PersistHidden();
+                RaiseWindowControlWarning();
+                return false;
+            }
+
             bool failed = false;
             foreach (var st in _monitors.Values)
                 for (int i = 0; i < st.Desktops.Count; i++)
                     if (i != st.Current && st.Desktops[i].Count > 0 && !HideManagedWindows(st.Desktops[i]))
                         failed = true;
-            PersistHidden();
+
             if (failed)
+            {
+                foreach (var h in _hidden.Where(kv => !kv.Value.Parked).Select(kv => kv.Key).ToList())
+                    ShowManagedWindow(h);
+                foreach (var st in _monitors.Values)
+                    for (int i = 0; i < st.Desktops.Count; i++)
+                        if (i != st.Current && st.Desktops[i].Count > 0)
+                            ParkManagedWindows(st.Desktops[i]);
+                PersistHidden();
                 RaiseWindowControlWarning();
+                return false;
+            }
+
+            SharedTaskbar = false;
+            PersistHidden();
             return true;
         }
     }
@@ -1460,14 +1742,14 @@ internal sealed class DesktopManager
                 Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
         }
 
-        _hidden[h] = rec with
+        SetHiddenRecord(h, rec with
         {
             NormalLeft = mapped.Left,
             NormalTop = mapped.Top,
             NormalRight = mapped.Right,
             NormalBottom = mapped.Bottom,
             ParkMonitor = dstDevice
-        };
+        });
     }
 
     private static Rectangle MapWindowRect(Native.RECT rect, Screen srcScreen, Screen dstScreen)

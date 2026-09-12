@@ -17,6 +17,8 @@ internal static class Program
             return;
         }
 
+        StorageMaintenance.Cleanup();
+
         TrayApp? app = null;
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += (_, e) =>

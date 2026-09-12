@@ -34,7 +34,7 @@ internal sealed class HelpForm : Form
         BackColor = Color.FromArgb(24, 24, 28);
         AutoScaleMode = AutoScaleMode.None;
         AutoScroll = true;
-        var uiFontFamily = SystemFonts.MessageBoxFont?.FontFamily ?? FontFamily.GenericSansSerif;
+        string uiFontFamily = GetUiFontFamilyName();
         _baseFont = new Font(uiFontFamily, 9.5f);
         _headerFont = new Font(uiFontFamily, 11.5f, FontStyle.Bold);
         Font = _baseFont;
@@ -80,7 +80,21 @@ internal sealed class HelpForm : Form
         };
         openBtn.FlatAppearance.BorderSize = 0;
         openBtn.Click += (_, _) =>
-            Process.Start(new ProcessStartInfo("ms-settings:devices-touchpad") { UseShellExecute = true });
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo("ms-settings:devices-touchpad")
+                {
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                AppLog.Error("Open touchpad settings", ex);
+                MessageBox.Show(this, ex.Message, "IndepenDesk",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        };
         Controls.Add(openBtn);
 
         var closeBtn = new Button
@@ -128,6 +142,12 @@ internal sealed class HelpForm : Form
 
     private int ScalePx(int value) => (int)Math.Round(value * _layoutScale);
 
+    private static string GetUiFontFamilyName()
+    {
+        using Font? systemFont = SystemFonts.MessageBoxFont;
+        return systemFont?.Name ?? FontFamily.GenericSansSerif.Name;
+    }
+
     protected override void Dispose(bool disposing)
     {
         base.Dispose(disposing);
@@ -143,9 +163,42 @@ internal sealed class HelpForm : Form
     /// 4 parmak sağa → masaüstü kayar; sola → geri; yukarı → genel bakış ızgarası.</summary>
     private sealed class GesturePanel : Panel
     {
-        private readonly System.Windows.Forms.Timer _timer = new() { Interval = 16 };
+        private const double MotionDurationMs = 1333.333;
+        private const double PhaseDurationMs = 1866.667;
+
+        private readonly System.Windows.Forms.Timer _timer = new() { Interval = 33 };
+        private readonly Stopwatch _clock = new();
+        private readonly GraphicsPath _padPath =
+            GraphicsExtensions.CreateRoundedRectanglePath(new Rectangle(30, 30, 180, 130), 16);
+        private readonly GraphicsPath _monitorPath =
+            GraphicsExtensions.CreateRoundedRectanglePath(new Rectangle(280, 22, 220, 132), 8);
+        private readonly SolidBrush _padBrush = new(Color.FromArgb(48, 48, 58));
+        private readonly Pen _padPen = new(Color.FromArgb(90, 90, 105), 2);
+        private readonly SolidBrush _fingerBrush = new(Color.FromArgb(130, 185, 245));
+        private readonly SolidBrush _trailBrush = new(Color.FromArgb(60, 130, 185, 245));
+        private readonly Pen _arrowPen = new(Color.FromArgb(130, 185, 245), 3)
+        {
+            EndCap = LineCap.ArrowAnchor
+        };
+        private readonly Pen _monitorPen = new(Color.FromArgb(120, 120, 135), 2);
+        private readonly SolidBrush _overviewCardBrush = new(Color.FromArgb(64, 96, 138));
+        private readonly SolidBrush _desktopOneBrush = new(Color.FromArgb(64, 96, 138));
+        private readonly SolidBrush _desktopTwoBrush = new(Color.FromArgb(76, 128, 96));
+        private readonly SolidBrush _windowBrush = new(Color.FromArgb(190, 205, 225));
+        private readonly Font _captionFont = new(GetUiFontFamilyName(), 12.7f, GraphicsUnit.Pixel);
+        private readonly SolidBrush _captionBrush = new(Color.FromArgb(200, 200, 212));
+        private readonly string _swipeUpCaption = L.T("help.demo.swipeUp");
+        private readonly string _swipeLrCaption = L.T("help.demo.swipeLR");
+        private readonly StringFormat _captionFormat = new()
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap,
+            Trimming = StringTrimming.EllipsisCharacter
+        };
         private double _t; // 0..1 faz ilerlemesi
         private int _phase; // 0: sağa, 1: sola, 2: yukarı
+        private bool _drawingResourcesDisposed;
 
         public GesturePanel()
         {
@@ -155,17 +208,53 @@ internal sealed class HelpForm : Form
             BackColor = Color.FromArgb(30, 30, 36);
             _timer.Tick += (_, _) =>
             {
-                _t += 0.012;
-                if (_t >= 1.4) { _t = 0; _phase = (_phase + 1) % 3; } // 1.0 sonrası bekleme payı
+                double elapsed = _clock.Elapsed.TotalMilliseconds;
+                long cycle = (long)(elapsed / PhaseDurationMs);
+                _phase = (int)(cycle % 3);
+                _t = elapsed % PhaseDurationMs / MotionDurationMs;
                 Invalidate();
             };
-            _timer.Start();
+        }
+
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            base.OnVisibleChanged(e);
+            if (_drawingResourcesDisposed) return;
+            if (Visible)
+            {
+                _clock.Start();
+                _timer.Start();
+            }
+            else
+            {
+                _timer.Stop();
+                _clock.Stop();
+            }
         }
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing)
+            if (disposing && !_drawingResourcesDisposed)
+            {
+                _drawingResourcesDisposed = true;
                 _timer.Dispose();
+                _clock.Stop();
+                _padPath.Dispose();
+                _monitorPath.Dispose();
+                _padBrush.Dispose();
+                _padPen.Dispose();
+                _fingerBrush.Dispose();
+                _trailBrush.Dispose();
+                _arrowPen.Dispose();
+                _monitorPen.Dispose();
+                _overviewCardBrush.Dispose();
+                _desktopOneBrush.Dispose();
+                _desktopTwoBrush.Dispose();
+                _windowBrush.Dispose();
+                _captionFont.Dispose();
+                _captionBrush.Dispose();
+                _captionFormat.Dispose();
+            }
             base.Dispose(disposing);
         }
 
@@ -183,12 +272,8 @@ internal sealed class HelpForm : Form
 
             // Sol: touchpad ve parmaklar
             var pad = new Rectangle(30, 30, 180, 130);
-            using (var padBrush = new SolidBrush(Color.FromArgb(48, 48, 58)))
-            using (var padPen = new Pen(Color.FromArgb(90, 90, 105), 2))
-            {
-                g.FillRoundedRectangleCompat(padBrush, pad, 16);
-                g.DrawRoundedRectangleCompat(padPen, pad, 16);
-            }
+            g.FillPath(_padBrush, _padPath);
+            g.DrawPath(_padPen, _padPath);
 
             // 4 parmak noktası: faza göre hareket yönü
             double dx = 0, dy = 0;
@@ -198,35 +283,27 @@ internal sealed class HelpForm : Form
                 case 1: dx = -ease * 70; break;
                 case 2: dy = -ease * 60; break;
             }
-            using (var finger = new SolidBrush(Color.FromArgb(130, 185, 245)))
-            using (var trail = new SolidBrush(Color.FromArgb(60, 130, 185, 245)))
-                for (int i = 0; i < 4; i++)
-                {
-                    int fx = pad.Left + 45 + i * 26;
-                    int fy = pad.Top + 70;
-                    g.FillEllipse(trail, (int)(fx + dx * 0.55) - 8, (int)(fy + dy * 0.55) - 8, 16, 16);
-                    g.FillEllipse(finger, (int)(fx + dx) - 8, (int)(fy + dy) - 8, 16, 16);
-                }
+            for (int i = 0; i < 4; i++)
+            {
+                int fx = pad.Left + 45 + i * 26;
+                int fy = pad.Top + 70;
+                g.FillEllipse(_trailBrush, (int)(fx + dx * 0.55) - 8, (int)(fy + dy * 0.55) - 8, 16, 16);
+                g.FillEllipse(_fingerBrush, (int)(fx + dx) - 8, (int)(fy + dy) - 8, 16, 16);
+            }
 
             // Yön oku
-            using (var arrowPen = new Pen(Color.FromArgb(130, 185, 245), 3) { EndCap = LineCap.ArrowAnchor })
+            int cx = pad.Left + 90, cy = pad.Top - 8;
+            switch (_phase)
             {
-                int cx = pad.Left + 90, cy = pad.Top - 8;
-                switch (_phase)
-                {
-                    case 0: g.DrawLine(arrowPen, cx - 30, cy, cx + 30, cy); break;
-                    case 1: g.DrawLine(arrowPen, cx + 30, cy, cx - 30, cy); break;
-                    case 2: g.DrawLine(arrowPen, pad.Right + 0, pad.Top + 95, pad.Right + 0, pad.Top + 35); break;
-                }
+                case 0: g.DrawLine(_arrowPen, cx - 30, cy, cx + 30, cy); break;
+                case 1: g.DrawLine(_arrowPen, cx + 30, cy, cx - 30, cy); break;
+                case 2: g.DrawLine(_arrowPen, pad.Right, pad.Top + 95, pad.Right, pad.Top + 35); break;
             }
 
             // Sağ: mini monitör ve etki
             var mon = new Rectangle(280, 22, 220, 132);
-            using (var monPen = new Pen(Color.FromArgb(120, 120, 135), 2))
-            {
-                g.DrawRoundedRectangleCompat(monPen, mon, 8);
-                g.DrawLine(monPen, mon.Left + 85, mon.Bottom + 8, mon.Right - 85, mon.Bottom + 8);
-            }
+            g.DrawPath(_monitorPen, _monitorPath);
+            g.DrawLine(_monitorPen, mon.Left + 85, mon.Bottom + 8, mon.Right - 85, mon.Bottom + 8);
             var inner = Rectangle.Inflate(mon, -6, -6);
             g.SetClip(inner);
 
@@ -239,38 +316,26 @@ internal sealed class HelpForm : Form
                     int gy = inner.Top + 12 + (i / 2) * 58;
                     int w = (int)(84 * (0.55 + 0.45 * (1 - ease)));
                     int h = (int)(46 * (0.55 + 0.45 * (1 - ease)));
-                    using var cardB = new SolidBrush(Color.FromArgb(64, 96, 138));
-                    g.FillRoundedRectangleCompat(cardB, new Rectangle(gx, gy, Math.Max(w, 46), Math.Max(h, 25)), 6);
+                    g.FillRoundedRectangleCompat(_overviewCardBrush,
+                        new Rectangle(gx, gy, Math.Max(w, 46), Math.Max(h, 25)), 6);
                 }
             }
             else
             {
                 // Masaüstü kayması: iki renkli sahne yana kayar
                 int shift = (int)(ease * inner.Width) * (_phase == 0 ? -1 : 1);
-                using var d1 = new SolidBrush(Color.FromArgb(64, 96, 138));
-                using var d2 = new SolidBrush(Color.FromArgb(76, 128, 96));
-                g.FillRectangle(d1, inner.Left + shift, inner.Top, inner.Width, inner.Height);
-                g.FillRectangle(d2, inner.Left + shift + (_phase == 0 ? inner.Width : -inner.Width),
+                g.FillRectangle(_desktopOneBrush, inner.Left + shift, inner.Top, inner.Width, inner.Height);
+                g.FillRectangle(_desktopTwoBrush, inner.Left + shift + (_phase == 0 ? inner.Width : -inner.Width),
                     inner.Top, inner.Width, inner.Height);
-                using var winB = new SolidBrush(Color.FromArgb(190, 205, 225));
-                g.FillRoundedRectangleCompat(winB, new Rectangle(inner.Left + shift + 20, inner.Top + 22, 74, 50), 4);
+                g.FillRoundedRectangleCompat(_windowBrush,
+                    new Rectangle(inner.Left + shift + 20, inner.Top + 22, 74, 50), 4);
             }
             g.ResetClip();
 
             // Alt yazı
-            string caption = _phase == 2 ? L.T("help.demo.swipeUp") : L.T("help.demo.swipeLR");
-            var captionFontFamily = SystemFonts.MessageBoxFont?.FontFamily ?? FontFamily.GenericSansSerif;
-            using var capFont = new Font(captionFontFamily, 12.7f, GraphicsUnit.Pixel);
-            using var capBrush = new SolidBrush(Color.FromArgb(200, 200, 212));
-            using var captionFormat = new StringFormat
-            {
-                Alignment = StringAlignment.Center,
-                LineAlignment = StringAlignment.Center,
-                FormatFlags = StringFormatFlags.NoWrap,
-                Trimming = StringTrimming.EllipsisCharacter
-            };
-            g.DrawString(caption, capFont, capBrush, new RectangleF(10, 162, designWidth - 20, 24),
-                captionFormat);
+            string caption = _phase == 2 ? _swipeUpCaption : _swipeLrCaption;
+            g.DrawString(caption, _captionFont, _captionBrush,
+                new RectangleF(10, 162, designWidth - 20, 24), _captionFormat);
             g.Restore(state);
         }
     }
@@ -281,17 +346,17 @@ internal static class GraphicsExtensions
 {
     public static void FillRoundedRectangleCompat(this Graphics g, Brush brush, Rectangle r, int radius)
     {
-        using var path = Rounded(r, radius);
+        using var path = CreateRoundedRectanglePath(r, radius);
         g.FillPath(brush, path);
     }
 
     public static void DrawRoundedRectangleCompat(this Graphics g, Pen pen, Rectangle r, int radius)
     {
-        using var path = Rounded(r, radius);
+        using var path = CreateRoundedRectanglePath(r, radius);
         g.DrawPath(pen, path);
     }
 
-    private static GraphicsPath Rounded(Rectangle r, int radius)
+    public static GraphicsPath CreateRoundedRectanglePath(Rectangle r, int radius)
     {
         int d = radius * 2;
         var path = new GraphicsPath();

@@ -65,7 +65,7 @@ La modalità opzionale **barra delle applicazioni condivisa** (menu della barra 
 ## Limitazioni note
 
 - Le finestre delle app con privilegi elevati non possono essere nascoste, a meno che IndepenDesk non sia eseguito come amministratore.
-- In modalità barra condivisa, le finestre parcheggiate continuano a essere renderizzate (uso GPU/CPU leggermente superiore rispetto alla nasconditura). Se il processo viene terminato in questa modalità, riavvia IndepenDesk 0.4.3+ per riportare a schermo le finestre parcheggiate (le versioni precedenti non leggono il nuovo formato di journal).
+- In modalità barra condivisa, le finestre parcheggiate continuano a essere renderizzate (uso GPU/CPU leggermente superiore rispetto alla nasconditura). Se il processo viene terminato in questa modalità, riavvia IndepenDesk 0.4.4+ per riportare a schermo le finestre parcheggiate (le versioni precedenti non leggono il formato v3 del journal).
 - Il nativo `Win+Ctrl+←/→` attiva ancora il cambio globale — basta non usarlo.
 - `Ctrl+Alt+←/→` può entrare in conflitto con le scorciatoie Intel "ruota schermo"; disattivale se necessario.
 - Il menu contestuale della barra delle applicazioni di Windows 11 non è estendibile; usa il menu della panoramica.
