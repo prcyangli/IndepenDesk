@@ -15,6 +15,7 @@ Les bureaux virtuels de Windows sont globaux : `Win+Ctrl+←/→` change **tous 
 - 🔢 **Raccourcis numériques globaux** — `Ctrl+Alt+chiffre` navigue entre moniteurs dans l'ordre des écrans ; la vue d'ensemble et l'OSD utilisent une numérotation locale par moniteur.
 - 🔔 **Indicateur compact à l'écran** après chaque changement, sans animation susceptible de prendre le focus.
 - 🗂 **Vue d'ensemble** (`Ctrl+Alt+↑`) — grille façon Mission Control avec glisser-déposer : déplacez les fenêtres entre bureaux et moniteurs, déplacez un bureau entier vers un autre moniteur, menu contextuel de déplacement.
+- 📌 **Barre des tâches partagée** (optionnel, menu de notification) — les fenêtres de tous les bureaux restent dans la barre des tâches et Alt-Tab ; un clic saute directement à son bureau.
 - 🌍 **8 langues** — détection automatique, modifiable depuis le menu de la zone de notification.
 - 🔄 **Vérification des mises à jour** via GitHub Releases.
 - 🚀 **Démarre avec Windows** par défaut — désactivable à tout moment depuis le menu de la zone de notification.
@@ -59,9 +60,12 @@ Par défaut, le balayage à quatre doigts déclenche le changement **global** de
 
 IndepenDesk n'utilise pas le système global de Windows. Il gère des ensembles de fenêtres par moniteur et, lors d'un changement, masque/affiche uniquement les fenêtres de ce moniteur (`ShowWindow`). Les fenêtres masquées disparaissent aussi de la barre des tâches et d'Alt-Tab. Les nouvelles fenêtres sont rattachées au bureau actif de leur moniteur.
 
+Le mode optionnel **barre des tâches partagée** (menu de notification) parque les fenêtres des bureaux inactifs hors écran au lieu de les masquer. Les fenêtres de tous les bureaux restent alors dans la barre des tâches et Alt-Tab, et en activer une bascule vers son bureau. Les positions parquées sont journalisées comme les fenêtres masquées et restaurées au démarrage suivant un plantage.
+
 ## Limitations connues
 
 - Les fenêtres des applications élevées (admin) ne peuvent pas être masquées, sauf si IndepenDesk est lui-même lancé en administrateur.
+- En mode barre des tâches partagée, les fenêtres parquées continuent de se dessiner (légère hausse GPU/CPU par rapport au masquage). Si le processus est tué dans ce mode, relancez IndepenDesk 0.4.3+ pour ramener les fenêtres parquées à l'écran (les versions antérieures ne lisent pas le nouveau format de journal).
 - Le raccourci natif `Win+Ctrl+←/→` déclenche toujours le changement global — il suffit de ne pas l'utiliser.
 - `Ctrl+Alt+←/→` peut entrer en conflit avec les raccourcis Intel « rotation de l'écran » ; désactivez-les si besoin.
 - Le menu contextuel de la barre des tâches de Windows 11 n'est pas extensible ; utilisez le menu contextuel de la vue d'ensemble.

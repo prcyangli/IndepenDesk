@@ -15,6 +15,7 @@ Windows virtual desktops are global: pressing `Win+Ctrl+←/→` switches **all 
 - 🔢 **Global number shortcuts** — `Ctrl+Alt+digit` jumps across monitors in screen order, while the Overview and OSD use clear per-monitor numbering.
 - 🔔 **Compact on-screen indicator** after every switch, without a focus-stealing slide animation.
 - 🗂 **Overview screen** (`Ctrl+Alt+↑`) — Mission Control-like grid with drag & drop: move windows between desktops and monitors, move whole desktops to another monitor, right-click move menu.
+- 📌 **Shared taskbar** (optional, tray menu) — windows from all desktops stay on the taskbar and Alt-Tab; clicking one jumps straight to its desktop.
 - 🌍 **8 languages** — English, Türkçe, Deutsch, Français, Italiano, Русский, 中文, 日本語 (auto-detected, changeable from the tray menu).
 - 🔄 **Update check** from the tray menu via GitHub Releases.
 - 🚀 **Starts with Windows** by default — can be turned off anytime from the tray menu.
@@ -59,9 +60,12 @@ By default the 4-finger swipe triggers Windows' **global** desktop switch. Overr
 
 IndepenDesk does not use (and cannot fix) Windows' global virtual desktop system. Instead it keeps per-monitor window sets and, on a switch, hides/shows only the windows of that monitor (`ShowWindow`). Hidden windows also disappear from the taskbar and Alt-Tab, so it feels like a real desktop switch. New windows are adopted onto the active desktop of the monitor they appear on; windows dragged to another monitor follow it automatically.
 
+The optional **shared taskbar** mode (tray menu) parks windows of inactive desktops off-screen instead of hiding them. Every desktop's windows then remain on the taskbar and in Alt-Tab, and activating one jumps to its desktop. Parked placements are journaled like hidden ones, so a restart after a crash restores everything.
+
 ## Known limitations
 
 - Windows of elevated (admin) apps cannot be hidden unless IndepenDesk itself runs as admin.
+- In shared-taskbar mode, parked windows keep rendering (slightly higher GPU/CPU use than hiding). If the app is killed in this mode, start IndepenDesk 0.4.3+ again to bring parked windows back on-screen (older versions cannot read the new journal format).
 - The native `Win+Ctrl+←/→` still triggers Windows' global switch — simply don't use it.
 - `Ctrl+Alt+←/→` may clash with Intel graphics "rotate screen" hotkeys; disable those in the Intel graphics settings if needed (a tray notification tells you when registration fails).
 - Windows 11's taskbar context menu cannot be extended by third-party apps; use the Overview's right-click menu instead.

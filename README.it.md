@@ -15,6 +15,7 @@ I desktop virtuali di Windows sono globali: `Win+Ctrl+←/→` cambia **tutti i 
 - 🔢 **Scorciatoie numeriche globali** — `Ctrl+Alt+cifra` passa tra monitor nell'ordine degli schermi; Panoramica e OSD usano numeri locali per monitor.
 - 🔔 **Indicatore compatto sullo schermo** dopo ogni cambio, senza animazioni che possano sottrarre il focus.
 - 🗂 **Panoramica** (`Ctrl+Alt+↑`) — griglia in stile Mission Control con trascinamento: sposta le finestre tra desktop e monitor, sposta interi desktop su un altro monitor, menu contestuale di spostamento.
+- 📌 **Barra delle applicazioni condivisa** (opzionale, menu della barra di sistema) — le finestre di tutti i desktop restano nella barra e in Alt-Tab; un clic salta direttamente al suo desktop.
 - 🌍 **8 lingue** — rilevate automaticamente, modificabili dal menu nella barra di sistema.
 - 🔄 **Controllo aggiornamenti** tramite GitHub Releases.
 - 🚀 **Si avvia con Windows** per impostazione predefinita — disattivabile in qualsiasi momento dal menu nella barra di sistema.
@@ -59,9 +60,12 @@ Per impostazione predefinita lo scorrimento a quattro dita attiva il cambio **gl
 
 IndepenDesk non usa il sistema globale di Windows. Gestisce insiemi di finestre per monitor e, al cambio, nasconde/mostra solo le finestre di quel monitor (`ShowWindow`). Le finestre nascoste spariscono anche dalla barra delle applicazioni e da Alt-Tab. Le nuove finestre vengono assegnate al desktop attivo del loro monitor.
 
+La modalità opzionale **barra delle applicazioni condivisa** (menu della barra di sistema) sposta le finestre dei desktop inattivi fuori schermo invece di nasconderle. Le finestre di tutti i desktop restano così nella barra e in Alt-Tab, e attivarne una passa al suo desktop. Le posizioni parcheggiate vengono registrate su disco come le finestre nascoste e ripristinate al riavvio dopo un crash.
+
 ## Limitazioni note
 
 - Le finestre delle app con privilegi elevati non possono essere nascoste, a meno che IndepenDesk non sia eseguito come amministratore.
+- In modalità barra condivisa, le finestre parcheggiate continuano a essere renderizzate (uso GPU/CPU leggermente superiore rispetto alla nasconditura). Se il processo viene terminato in questa modalità, riavvia IndepenDesk 0.4.3+ per riportare a schermo le finestre parcheggiate (le versioni precedenti non leggono il nuovo formato di journal).
 - Il nativo `Win+Ctrl+←/→` attiva ancora il cambio globale — basta non usarlo.
 - `Ctrl+Alt+←/→` può entrare in conflitto con le scorciatoie Intel "ruota schermo"; disattivale se necessario.
 - Il menu contestuale della barra delle applicazioni di Windows 11 non è estendibile; usa il menu della panoramica.

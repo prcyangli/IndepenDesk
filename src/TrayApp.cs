@@ -18,6 +18,8 @@ internal sealed class TrayApp : ApplicationContext
     private readonly SlideAnimator _animator = new();
     private readonly HotkeyWindow _hotkeys;
     private readonly System.Windows.Forms.Timer _syncTimer = new() { Interval = 600 };
+    private Native.WinEventDelegate? _foregroundProc;
+    private IntPtr _foregroundHook;
     private bool _exiting;
     private bool _resourcesDisposed;
 
@@ -54,6 +56,17 @@ internal sealed class TrayApp : ApplicationContext
 
         RegisterHotkeys();
 
+        // 共享任务栏：任务栏/Alt-Tab 激活停靠窗口时跳转到其所在桌面。
+        var foregroundProc = new Native.WinEventDelegate(OnForegroundEvent);
+        _foregroundProc = foregroundProc;
+        _foregroundHook = Native.SetWinEventHook(
+            Native.EVENT_SYSTEM_FOREGROUND, Native.EVENT_SYSTEM_FOREGROUND,
+            IntPtr.Zero, foregroundProc, 0, 0,
+            Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
+        if (_foregroundHook == IntPtr.Zero)
+            AppLog.Warning(nameof(TrayApp),
+                "SetWinEventHook(EVENT_SYSTEM_FOREGROUND) failed; taskbar jump is unavailable.");
+
         _manager.Sync();
 #if DEBUG
         // Debug builds are used for local UI verification, so show the overview immediately.
@@ -76,6 +89,28 @@ internal sealed class TrayApp : ApplicationContext
 
         menu.Items.Add(L.T("menu.overview"), null, (_, _) => OverviewForm.Toggle(_manager));
         menu.Items.Add(L.T("menu.restore"), null, (_, _) => _manager.RestoreAll());
+
+        var sharedItem = new ToolStripMenuItem(L.T("menu.sharedTaskbar"))
+        {
+            Checked = _manager.SharedTaskbar,
+            CheckOnClick = true
+        };
+        bool sharedRestoring = false;
+        sharedItem.CheckedChanged += (_, _) =>
+        {
+            if (sharedRestoring) return;
+            if (_manager.SetSharedTaskbarMode(sharedItem.Checked))
+            {
+                SettingsStore.SetBool("sharedTaskbar", sharedItem.Checked);
+                return;
+            }
+            sharedRestoring = true;
+            sharedItem.Checked = _manager.SharedTaskbar;
+            sharedRestoring = false;
+            _tray.ShowBalloonTip(4000, "IndepenDesk", L.T("msg.sharedTaskbarFail"), ToolTipIcon.Warning);
+        };
+        menu.Items.Add(sharedItem);
+
         menu.Items.Add(L.T("menu.help"), null, (_, _) => HelpForm.ShowHelp());
         menu.Items.Add(new ToolStripSeparator());
 
@@ -132,6 +167,13 @@ internal sealed class TrayApp : ApplicationContext
     }
 
     private static string Truncate(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "…";
+
+    private void OnForegroundEvent(IntPtr hook, uint eventType, IntPtr hwnd, int idObject,
+        int idChild, uint thread, uint time)
+    {
+        if (idObject == Native.OBJID_WINDOW && hwnd != IntPtr.Zero)
+            _manager.HandleForegroundActivated(hwnd);
+    }
 
     private void OnHotkey(int id)
     {
@@ -236,6 +278,12 @@ internal sealed class TrayApp : ApplicationContext
         _syncTimer.Stop();
         for (int id = 1; id < HkDesktopBase + 9; id++)
             Native.UnregisterHotKey(_hotkeys.Handle, id);
+        if (_foregroundHook != IntPtr.Zero)
+        {
+            Native.UnhookWinEvent(_foregroundHook);
+            _foregroundHook = IntPtr.Zero;
+        }
+        _foregroundProc = null;
         _animator.Dispose();
         var menu = _tray.ContextMenuStrip;
         _tray.ContextMenuStrip = null;

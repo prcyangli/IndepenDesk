@@ -15,6 +15,7 @@ Windows'un sanal masaüstleri globaldir: `Win+Ctrl+←/→` **tüm monitörleri 
 - 🔢 **Global rakam kısayolları** — `Ctrl+Alt+rakam` ekran sırasına göre monitörler arasında geçer; Genel Bakış ve OSD monitör başına yerel numaralar kullanır.
 - 🔔 **Kompakt ekran göstergesi** her geçişten sonra görünür; odağı çalabilecek kaydırma animasyonu oynatılmaz.
 - 🗂 **Genel Bakış** (`Ctrl+Alt+↑`) — Mission Control benzeri ekran, sürükle-bırak: pencereleri masaüstleri ve monitörler arasında taşıyın, masaüstünü komple başka monitöre taşıyın, sağ tık taşıma menüsü.
+- 📌 **Paylaşılan görev çubuğu** (isteğe bağlı, tray menüsü) — tüm masaüstlerin pencereleri görev çubuğunda ve Alt-Tab'da kalır; birine tıklamak doğrudan masaüstüne geçer.
 - 🌍 **8 dil** — English, Türkçe, Deutsch, Français, Italiano, Русский, 中文, 日本語 (otomatik algılanır, tray menüsünden değiştirilebilir).
 - 🔄 **Güncelleme denetimi** — tray menüsünden, GitHub Releases üzerinden.
 - 🚀 **Windows ile birlikte başlar** (varsayılan) — tray menüsünden istediğiniz an kapatılabilir.
@@ -59,9 +60,12 @@ Varsayılanda 4 parmak kaydırma Windows'un **global** geçişini tetikler. Ezme
 
 IndepenDesk, Windows'un global sanal masaüstü sistemini kullanmaz (o sistem düzeltilemez). Bunun yerine monitör başına pencere setleri tutar ve geçişte yalnızca o monitörün pencerelerini gizler/gösterir (`ShowWindow`). Gizlenen pencereler görev çubuğundan ve Alt-Tab'dan da kalkar — gerçek masaüstü geçişi hissi verir. Yeni pencereler açıldıkları monitörün aktif masaüstüne atanır; başka monitöre sürüklenen pencere otomatik oraya geçer.
 
+İsteğe bağlı **paylaşılan görev çubuğu** modu (tray menüsü) pasif masaüstlerin pencerelerini gizlemek yerine ekran dışına park eder. Böylece her masaüstün pencereleri görev çubuğunda ve Alt-Tab'da kalır; birini etkinleştirmek masaüstüne geçer. Park konumları da gizlenenler gibi diske kaydedilir; çökmeden sonra yeniden başlatınca her şey geri gelir.
+
 ## Bilinen sınırlar
 
 - Yönetici yetkisiyle çalışan uygulamaların pencereleri, IndepenDesk yönetici değilse gizlenemez.
+- Paylaşılan görev çubuğu modunda park edilen pencereler çizilmeye devam eder (gizlemeye göre biraz daha fazla GPU/CPU). Bu modda süreç zorla kapatılırsa, park edilmiş pencereleri geri getirmek için IndepenDesk 0.4.3+ sürümünü yeniden başlatın (eski sürümler yeni günlük biçimini okuyamaz).
 - Yerleşik `Win+Ctrl+←/→` hâlâ global geçişi tetikler — kullanmamak yeterli.
 - `Ctrl+Alt+←/→` bazı Intel ekran sürücülerinde "ekranı döndür" ile çakışabilir; gerekirse Intel ayarlarından kapatın (kayıt başarısız olursa tray bildirimi görürsünüz).
 - Windows 11 görev çubuğu menüsü üçüncü parti uygulamalarca genişletilemez; Genel Bakış'taki sağ tık menüsünü kullanın.

@@ -15,6 +15,7 @@ Virtuelle Desktops unter Windows sind global: `Win+Strg+←/→` wechselt **alle
 - 🔢 **Globale Ziffernkürzel** — `Strg+Alt+Ziffer` springt in Bildschirmreihenfolge monitorübergreifend; Übersicht und OSD verwenden lokale Nummern je Monitor.
 - 🔔 **Kompakte Bildschirmanzeige** nach jedem Wechsel, ohne fokusraubende Wischanimation.
 - 🗂 **Übersicht** (`Strg+Alt+↑`) — Mission-Control-ähnliche Ansicht mit Drag & Drop: Fenster zwischen Desktops und Monitoren verschieben, ganze Desktops auf einen anderen Monitor ziehen, Rechtsklick-Menü.
+- 📌 **Gemeinsame Taskleiste** (optional, Tray-Menü) — Fenster aller Desktops bleiben in Taskleiste und Alt-Tab; ein Klick springt direkt zum zugehörigen Desktop.
 - 🌍 **8 Sprachen** — automatisch erkannt, über das Tray-Menü änderbar.
 - 🔄 **Update-Prüfung** über GitHub Releases im Tray-Menü.
 - 🚀 **Startet standardmäßig mit Windows** — jederzeit im Tray-Menü abschaltbar.
@@ -59,9 +60,12 @@ Standardmäßig löst das Vier-Finger-Wischen den **globalen** Windows-Wechsel a
 
 IndepenDesk nutzt nicht das globale System von Windows. Stattdessen verwaltet es Fenstermengen pro Monitor und blendet beim Wechsel nur die Fenster dieses Monitors aus/ein (`ShowWindow`). Versteckte Fenster verschwinden auch aus Taskleiste und Alt-Tab. Neue Fenster werden dem aktiven Desktop ihres Monitors zugeordnet.
 
+Der optionale Modus **Gemeinsame Taskleiste** (Tray-Menü) parkt Fenster inaktiver Desktops statt sie auszublenden einfach außerhalb des Bildschirms. Damit bleiben die Fenster aller Desktops in Taskleiste und Alt-Tab sichtbar, und das Aktivieren eines Fensters wechselt zu seinem Desktop. Geparkte Positionen werden wie versteckte protokolliert und nach einem Absturz beim nächsten Start wiederhergestellt.
+
 ## Bekannte Einschränkungen
 
 - Fenster von Programmen mit Administratorrechten können nur versteckt werden, wenn IndepenDesk selbst als Administrator läuft.
+- Im Modus „Gemeinsame Taskleiste“ rendern geparkte Fenster weiter (etwas höherer GPU-/CPU-Verbrauch als beim Ausblenden). Wird der Prozess in diesem Modus abgeschossen, starten Sie IndepenDesk 0.4.3+ erneut, um die geparkten Fenster zurückzuholen (ältere Versionen können das neue Journalformat nicht lesen).
 - Das native `Win+Strg+←/→` löst weiterhin den globalen Wechsel aus — einfach nicht verwenden.
 - `Strg+Alt+←/→` kann mit Intel-Grafik-Hotkeys („Bildschirm drehen") kollidieren; ggf. in den Intel-Einstellungen deaktivieren.
 - Das Kontextmenü der Windows-11-Taskleiste ist nicht erweiterbar; nutzen Sie das Rechtsklick-Menü der Übersicht.
