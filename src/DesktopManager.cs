@@ -630,11 +630,14 @@ internal sealed class DesktopManager
             RemoveHiddenRecord(h);
             return false;
         }
-        if (HasSavedPlacement(record) && IsWindowOffScreen(h) &&
-            !RestoreParkedWindow(h, record))
+        // A hidden maximized window can keep its live maximized rectangle on the
+        // source display even after rcNormalPosition was mapped to another one.
+        // Always materialize the recorded restore placement before showing it;
+        // checking only IsWindowOffScreen would expose it on the old display.
+        if (HasSavedPlacement(record) && !RestoreParkedWindow(h, record))
         {
             AppLog.Warning(nameof(ShowManagedWindow),
-                $"Could not move HWND={h} from a disconnected display.");
+                $"Could not restore HWND={h} to its recorded display.");
             return false;
         }
         if (!Native.IsWindowVisible(h))
@@ -987,23 +990,33 @@ internal sealed class DesktopManager
                 windowRect, normalRect, showCmd));
     }
 
-    /// <summary>Restore a parked window on-screen according to its record; does not touch _hidden or the logs (the caller handles those).</summary>
+    /// <summary>Restore a managed window on-screen according to its record; does not touch _hidden or the logs (the caller handles those).</summary>
     private bool RestoreParkedWindow(IntPtr h, HiddenWindowRecord rec)
     {
         var pl = new Native.WINDOWPLACEMENT { length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>() };
         bool hasPlacement = Native.GetWindowPlacement(h, ref pl);
 
         var saved = Rectangle.FromLTRB(rec.NormalLeft, rec.NormalTop, rec.NormalRight, rec.NormalBottom);
+        if (saved.Width <= 0 || saved.Height <= 0) return false;
+
+        Screen? target = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == rec.ParkMonitor);
+        target ??= NearestScreen(saved) ?? Screen.PrimaryScreen;
+        if (target == null) return false;
+
         if (!IntersectsAnyScreen(saved))
         {
             // After a display is unplugged the saved rectangle may lie outside every screen: migrate it to the nearest one.
-            var host = NearestScreen(saved) ?? Screen.PrimaryScreen;
-            if (host == null) return false;
-            var wa = host.WorkingArea;
+            var wa = target.WorkingArea;
             saved.Width = Math.Min(saved.Width, wa.Width);
             saved.Height = Math.Min(saved.Height, wa.Height);
             saved.Location = new Point(wa.Left + (wa.Width - saved.Width) / 2,
                 wa.Top + (wa.Height - saved.Height) / 2);
+        }
+        else
+        {
+            // WINDOWPLACEMENT can retain a normal rectangle on a different display
+            // while a maximized window is physically hosted by ParkMonitor.
+            saved = NormalizeWindowRectForScreen(saved, target);
         }
 
         if (Native.IsIconic(h))
@@ -1011,15 +1024,13 @@ internal sealed class DesktopManager
             // The user minimized a parked window (e.g. Win+D): keep it minimized and only move
             // the restore position back on-screen. Since 25H2 SetWindowPlacement ignores
             // rcNormalPosition, we must use the show -> place -> re-minimize chain.
-            return RestoreIconicPlacement(h, saved);
+            return RestoreIconicPlacement(h, saved) &&
+                   IsNormalPlacementAssignedToDisplay(h, target.DeviceName);
         }
 
-        if (Native.IsZoomed(h))
+        if (Native.IsZoomed(h) || rec.SavedShowCmd == Native.SW_SHOWMAXIMIZED)
         {
-            Screen? screen = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == rec.ParkMonitor)
-                             ?? Screen.PrimaryScreen;
-            if (screen == null) return false;
-            var wa = screen.WorkingArea;
+            var wa = target.WorkingArea;
             if (!Native.SetWindowPos(h, IntPtr.Zero, wa.X, wa.Y, wa.Width, wa.Height,
                     Native.SWP_NOZORDER | Native.SWP_NOACTIVATE))
                 return false;
@@ -1027,13 +1038,14 @@ internal sealed class DesktopManager
             {
                 pl.showCmd = Native.SW_SHOWMAXIMIZED;
                 pl.rcNormalPosition = ToRECT(saved);
-                Native.SetWindowPlacement(h, ref pl);
+                if (!Native.SetWindowPlacement(h, ref pl)) return false;
             }
-            return !IsWindowOffScreen(h);
+            return IsWindowPhysicallyAssignedToDisplay(h, target.DeviceName);
         }
 
         return Native.SetWindowPos(h, IntPtr.Zero, saved.X, saved.Y, saved.Width, saved.Height,
-                   Native.SWP_NOZORDER | Native.SWP_NOACTIVATE) && !IsWindowOffScreen(h);
+                   Native.SWP_NOZORDER | Native.SWP_NOACTIVATE) &&
+               IsWindowPhysicallyAssignedToDisplay(h, target.DeviceName);
     }
 
     /// <summary>Bring a visible, unjournaled window back after its display disappears.</summary>
@@ -2446,14 +2458,20 @@ internal sealed class DesktopManager
     /// For a parked window: map the saved rectangle by DPI and transfer it to the target display's parking area.</summary>
     private bool RepositionWindow(IntPtr h, string srcDevice, string dstDevice)
     {
-        if (_hidden.TryGetValue(h, out var rec) && rec.Parked)
-            return RepositionParkedWindow(h, rec, srcDevice, dstDevice);
+        HiddenWindowRecord? hiddenRecord = null;
+        if (_hidden.TryGetValue(h, out var rec))
+        {
+            if (rec.Parked)
+                return RepositionParkedWindow(h, rec, srcDevice, dstDevice);
+            hiddenRecord = rec;
+        }
 
         var srcScreen = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == srcDevice);
         var dstScreen = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == dstDevice);
         if (srcScreen == null || dstScreen == null) return false;
         bool wasVisible = Native.IsWindowVisible(h);
-        bool wasMaximized = Native.IsZoomed(h);
+        bool wasMaximized = Native.IsZoomed(h) ||
+                            hiddenRecord?.SavedShowCmd == Native.SW_SHOWMAXIMIZED;
 
         var originalPlacement = new Native.WINDOWPLACEMENT
         {
@@ -2462,15 +2480,19 @@ internal sealed class DesktopManager
         bool hasPlacement = Native.GetWindowPlacement(h, ref originalPlacement);
         bool hasWindowRect = Native.GetWindowRect(h, out Native.RECT originalWindowRect);
 
-        Native.RECT sourceRect;
-        if (hasPlacement)
-            sourceRect = originalPlacement.rcNormalPosition;
+        Rectangle sourceRect;
+        if (hiddenRecord != null && HasSavedPlacement(hiddenRecord))
+            sourceRect = Rectangle.FromLTRB(hiddenRecord.NormalLeft, hiddenRecord.NormalTop,
+                hiddenRecord.NormalRight, hiddenRecord.NormalBottom);
+        else if (hasPlacement)
+            sourceRect = FromRECT(originalPlacement.rcNormalPosition);
         else if (hasWindowRect)
-            sourceRect = originalWindowRect;
+            sourceRect = FromRECT(originalWindowRect);
         else
             return false;
 
-        Rectangle mapped = MapWindowRect(sourceRect, srcScreen, dstScreen);
+        sourceRect = NormalizeWindowRectForScreen(sourceRect, srcScreen);
+        Rectangle mapped = MapWindowRect(ToRECT(sourceRect), srcScreen, dstScreen);
         bool applied = false;
         int? win32Error = null;
         for (int attempt = 1; attempt <= ParkAttemptCount; attempt++)
@@ -2496,8 +2518,25 @@ internal sealed class DesktopManager
             if (!wasVisible && Native.IsWindowVisible(h))
                 Native.ShowWindow(h, Native.SW_HIDE);
 
-            if (applied && IsWindowAssignedToDisplay(h, dstDevice))
+            bool assigned = IsWindowPhysicallyAssignedToDisplay(h, dstDevice) ||
+                            (!wasVisible && hiddenRecord != null &&
+                             IsNormalPlacementAssignedToDisplay(h, dstDevice));
+            if (applied && assigned)
+            {
+                if (hiddenRecord != null)
+                {
+                    SetHiddenRecord(h, hiddenRecord with
+                    {
+                        NormalLeft = mapped.Left,
+                        NormalTop = mapped.Top,
+                        NormalRight = mapped.Right,
+                        NormalBottom = mapped.Bottom,
+                        ParkMonitor = dstDevice
+                    });
+                    PersistHidden();
+                }
                 return true;
+            }
 
             if (attempt < ParkAttemptCount)
             {
@@ -2541,10 +2580,11 @@ internal sealed class DesktopManager
         return false;
     }
 
-    private static bool IsWindowAssignedToDisplay(IntPtr h, string device)
-    {
-        if (Native.GetMonitorDeviceOfWindow(h) == device) return true;
+    private static bool IsWindowPhysicallyAssignedToDisplay(IntPtr h, string device) =>
+        Native.GetMonitorDeviceOfWindow(h) == device;
 
+    private static bool IsNormalPlacementAssignedToDisplay(IntPtr h, string device)
+    {
         var placement = new Native.WINDOWPLACEMENT
         {
             length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>()
@@ -2683,6 +2723,15 @@ internal sealed class DesktopManager
         x = Math.Clamp(x, destinationArea.Left, Math.Max(destinationArea.Left, destinationArea.Right - width));
         y = Math.Clamp(y, destinationArea.Top, Math.Max(destinationArea.Top, destinationArea.Bottom - height));
         return new Rectangle(x, y, width, height);
+    }
+
+    private static Rectangle NormalizeWindowRectForScreen(Rectangle rect, Screen targetScreen)
+    {
+        if (rect.Width <= 0 || rect.Height <= 0) return rect;
+        Screen currentScreen = Screen.FromRectangle(rect);
+        return currentScreen.DeviceName == targetScreen.DeviceName
+            ? rect
+            : MapWindowRect(ToRECT(rect), currentScreen, targetScreen);
     }
 
     private static uint GetScreenDpi(Screen screen)
