@@ -50,7 +50,8 @@ internal sealed class DesktopManager
         string? ParkMonitor);
 
     /// <summary>一个无法安全管理（隐藏/停靠）的窗口；跳过后保持可见并跟随当前桌面。</summary>
-    private sealed record UnmanageableWindow(uint ProcessId, string ProcessName, string ClassName, string Reason);
+    private sealed record UnmanageableWindow(uint ProcessId, string ProcessName, string ClassName,
+        string Reason, string Title);
 
     private sealed record HiddenStateFile(
         int Version,
@@ -384,7 +385,11 @@ internal sealed class DesktopManager
         foreach (IntPtr h in handles.Distinct())
         {
             if (!Native.IsWindow(h) || !Native.IsWindowVisible(h)) continue;
-            if (IsKnownUnmanageable(h)) continue;
+            if (IsKnownUnmanageable(h))
+            {
+                NotifyKnownUnmanageable(h);
+                continue;
+            }
             // A failed mode rollback can leave an off-screen parking record that
             // still contains the only safe restore geometry. Preserve that record
             // when converting the window to ordinary hidden-mode visibility.
@@ -480,12 +485,20 @@ internal sealed class DesktopManager
         string title = Native.GetWindowTitle(h);
         if (title.Length > 60) title = title[..60] + "…";
         string className = Native.GetWindowClass(h);
-        _unmanageable[h] = new UnmanageableWindow(pid, processName, className, reason);
+        _unmanageable[h] = new UnmanageableWindow(pid, processName, className, reason, title);
 
         AppLog.Warning(nameof(RegisterUnmanageable),
             $"Skipped unmanageable window (reason={reason}): HWND={h}, title='{title}', " +
             $"class='{className}', process='{processName}' (PID {pid}); it stays visible.");
         WindowControlFailed?.Invoke(new UnmanageableWindowInfo(h, processName, title, reason));
+    }
+
+    /// <summary>已知不可管理窗口再次被跳过/操作时：不重复写日志，仅重新发送通知事件
+    /// （托盘层按会话去重；通知曾被关闭时，重新开启后下一次跳过仍可弹出提示）。</summary>
+    private void NotifyKnownUnmanageable(IntPtr h)
+    {
+        if (_unmanageable.TryGetValue(h, out var info))
+            WindowControlFailed?.Invoke(new UnmanageableWindowInfo(h, info.ProcessName, info.Title, info.Reason));
     }
 
     /// <summary>
@@ -821,7 +834,11 @@ internal sealed class DesktopManager
             if (_hidden.TryGetValue(h, out var existing) && existing.Parked &&
                 MatchesWindowIdentity(h, existing) && IsWindowOffScreen(h))
                 continue;
-            if (IsKnownUnmanageable(h)) continue;
+            if (IsKnownUnmanageable(h))
+            {
+                NotifyKnownUnmanageable(h);
+                continue;
+            }
             if (ShouldSkipForIntegrity(h, out string reason))
             {
                 RegisterUnmanageable(h, reason);
@@ -1231,9 +1248,10 @@ internal sealed class DesktopManager
         if (target >= st.Desktops.Count)
         {
             // 不可管理窗口（如管理员窗口）始终跟随当前桌面，不能作为"桌面非空"
-            // 的依据；仅剩这类窗口时视同空桌面，避免在末尾无限新建。
+            // 的依据；仅剩这类窗口时视同空桌面，避免在末尾无限新建。未缓存的
+            // 窗口现场探测完整性（纯查询，不登记——登记只发生在真正的隐藏/停靠时）。
             bool hasEffectiveWindows = st.Desktops[st.Current]
-                .Any(h => Native.IsWindow(h) && !IsKnownUnmanageable(h));
+                .Any(h => Native.IsWindow(h) && !IsKnownUnmanageable(h) && !ShouldSkipForIntegrity(h, out _));
             bool canGrow = delta > 0
                 && st.Desktops.Count < MaxDesktopsPerMonitor
                 && hasEffectiveWindows; // boş masaüstünden yenisi açılmaz
@@ -1681,10 +1699,12 @@ internal sealed class DesktopManager
         IntPtr fg = Native.GetForegroundWindow();
         if (fg == IntPtr.Zero || !IsEligible(fg)) return;
         // 活动窗口无法控制（如管理员窗口）时，移动没有意义：不新建桌面、
-        // 不移动，复用跳过通知（托盘气泡按会话去重）。
+        // 不移动，只发通知（不重复登记日志；气泡由托盘层按会话去重）。
         if (IsKnownUnmanageable(fg))
         {
-            RegisterUnmanageable(fg, _unmanageable[fg].Reason);
+            AppLog.Info(nameof(MoveActiveWindow),
+                $"Move ignored: HWND={fg} is unmanageable and stays on the current desktop.");
+            NotifyKnownUnmanageable(fg);
             return;
         }
         if (ShouldSkipForIntegrity(fg, out string skipReason))
