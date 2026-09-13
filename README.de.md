@@ -65,6 +65,7 @@ Der optionale Modus **Gemeinsame Taskleiste** (Tray-Menü) parkt Fenster inaktiv
 ## Bekannte Einschränkungen
 
 - Fenster von Programmen mit Administratorrechten können nur versteckt werden, wenn IndepenDesk selbst als Administrator läuft.
+- „Benutzerdefinierte" Touchpad-Gesten sind synthetische Tastendrücke: Solange ein Fenster mit Administratorrechten fokussiert ist, verwirft die Windows-Sicherheit (UIPI) sie, und die Gesten wirken nicht mehr. Physische Tastenkürzel und das Tray-Menü funktionieren weiterhin — nutzen Sie dann diese.
 - Im Modus „Gemeinsame Taskleiste“ rendern geparkte Fenster weiter (etwas höherer GPU-/CPU-Verbrauch als beim Ausblenden). Wird der Prozess in diesem Modus abgeschossen, starten Sie IndepenDesk 0.4.4+ erneut, um die geparkten Fenster zurückzuholen (ältere Versionen können das v3-Journalformat nicht lesen).
 - Das native `Win+Strg+←/→` löst weiterhin den globalen Wechsel aus — einfach nicht verwenden.
 - `Strg+Alt+←/→` kann mit Intel-Grafik-Hotkeys („Bildschirm drehen") kollidieren; ggf. in den Intel-Einstellungen deaktivieren.

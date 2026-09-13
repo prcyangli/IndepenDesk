@@ -65,6 +65,7 @@ IndepenDesk, Windows'un global sanal masaüstü sistemini kullanmaz (o sistem d�
 ## Bilinen sınırlar
 
 - Yönetici yetkisiyle çalışan uygulamaların pencereleri, IndepenDesk yönetici değilse gizlenemez.
+- Dokunmatik yüzey "özel kısayol" hareketleri sentetik tuş vuruşlarıdır: yükseltilmiş (yönetici) bir pencere odaktayken Windows güvenliği (UIPI) bunları yok sayar ve hareketler çalışmaz. Fiziksel klavye kısayolları ve tepsi menüsü etkilenmez; bunları kullanın.
 - Paylaşılan görev çubuğu modunda park edilen pencereler çizilmeye devam eder (gizlemeye göre biraz daha fazla GPU/CPU). Bu modda süreç zorla kapatılırsa, park edilmiş pencereleri geri getirmek için IndepenDesk 0.4.4+ sürümünü yeniden başlatın (eski sürümler v3 günlük biçimini okuyamaz).
 - Yerleşik `Win+Ctrl+←/→` hâlâ global geçişi tetikler — kullanmamak yeterli.
 - `Ctrl+Alt+←/→` bazı Intel ekran sürücülerinde "ekranı döndür" ile çakışabilir; gerekirse Intel ayarlarından kapatın (kayıt başarısız olursa tray bildirimi görürsünüz).

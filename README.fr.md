@@ -65,6 +65,7 @@ Le mode optionnel **barre des tâches partagée** (menu de notification) parque 
 ## Limitations connues
 
 - Les fenêtres des applications élevées (admin) ne peuvent pas être masquées, sauf si IndepenDesk est lui-même lancé en administrateur.
+- Les gestes « Raccourci personnalisé » du pavé tactile sont des frappes synthétisées : lorsqu'une fenêtre élevée (admin) est active, la sécurité Windows (UIPI) les ignore et les gestes cessent de fonctionner. Les raccourcis au clavier physique et le menu de la zone de notification restent utilisables.
 - En mode barre des tâches partagée, les fenêtres parquées continuent de se dessiner (légère hausse GPU/CPU par rapport au masquage). Si le processus est tué dans ce mode, relancez IndepenDesk 0.4.4+ pour ramener les fenêtres parquées à l'écran (les versions antérieures ne lisent pas le format v3 du journal).
 - Le raccourci natif `Win+Ctrl+←/→` déclenche toujours le changement global — il suffit de ne pas l'utiliser.
 - `Ctrl+Alt+←/→` peut entrer en conflit avec les raccourcis Intel « rotation de l'écran » ; désactivez-les si besoin.

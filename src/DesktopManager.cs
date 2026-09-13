@@ -12,6 +12,9 @@ internal sealed record WindowEntry(IntPtr Handle, string Title);
 internal sealed record DesktopEntry(int LocalIndex, bool IsCurrent, IReadOnlyList<WindowEntry> Windows);
 internal sealed record MonitorEntry(string Device, int Ordinal, IReadOnlyList<DesktopEntry> Desktops);
 
+/// <summary>被跳过的不可管理窗口（句柄、进程名、标题、原因），供通知层显示。</summary>
+internal sealed record UnmanageableWindowInfo(IntPtr Handle, string ProcessName, string Title, string Reason);
+
 /// <summary>
 /// Monitör başına bağımsız sanal masaüstü yöneticisi.
 /// Windows'un global sanal masaüstü sistemini kullanmaz; bunun yerine her monitör için
@@ -46,6 +49,9 @@ internal sealed class DesktopManager
         int SavedShowCmd,
         string? ParkMonitor);
 
+    /// <summary>一个无法安全管理（隐藏/停靠）的窗口；跳过后保持可见并跟随当前桌面。</summary>
+    private sealed record UnmanageableWindow(uint ProcessId, string ProcessName, string ClassName, string Reason);
+
     private sealed record HiddenStateFile(
         int Version,
         int SessionId,
@@ -69,10 +75,13 @@ internal sealed class DesktopManager
     private long _hiddenVersion;
     private long _persistedHiddenVersion = -1;
     private readonly Dictionary<uint, ObservedProcessIdentity?> _syncProcessIdentities = new();
+    private readonly Dictionary<IntPtr, UnmanageableWindow> _unmanageable = new();
     private bool _syncInProgress;
-    private bool _windowControlWarningRaised;
     private bool _stateFileBlocked;
     private bool _switchInProgress;
+
+    /// <summary>自身是否以管理员权限运行；提权后可控制同用户的全部窗口，无需预检测。</summary>
+    private static readonly bool OwnProcessElevated = Native.IsOwnProcessElevated();
 
     /// <summary>
     /// 共享任务栏模式：非当前桌面的窗口不隐藏，而是移到屏幕外停靠。
@@ -87,8 +96,9 @@ internal sealed class DesktopManager
     /// <summary>Geçiş tamamlandı (veya uçta OSD tazelemesi).</summary>
     public event Action<SwitchInfo>? DesktopSwitched;
 
-    /// <summary>Bir pencere güvenli biçimde gizlenemediğinde oturumda bir kez tetiklenir.</summary>
-    public event Action? WindowControlFailed;
+    /// <summary>一个窗口被判定为不可管理（已跳过，保持可见），或一次桌面操作被取消
+    /// （载荷为 null 时表示取消类错误）。</summary>
+    public event Action<UnmanageableWindowInfo?>? WindowControlFailed;
 
     private static readonly string[] ClassBlacklist =
     {
@@ -351,8 +361,11 @@ internal sealed class DesktopManager
             return identity.Value.SessionId == record.SessionId &&
                    identity.Value.ProcessStartTimeUtcTicks == record.ProcessStartTimeUtcTicks;
         }
-        catch
+        catch (Exception ex)
         {
+            if (Native.IsWindow(h))
+                AppLog.Warning(nameof(MatchesWindowIdentity),
+                    $"Identity check failed for a live HWND={h}: {ex.GetType().Name}: {ex.Message}.");
             if (_syncInProgress &&
                 Native.GetWindowThreadProcessId(h, out uint failedPid) != 0 && failedPid != 0)
                 _syncProcessIdentities[failedPid] = null;
@@ -361,16 +374,17 @@ internal sealed class DesktopManager
     }
 
     /// <summary>
-    /// Writes the intended hidden set before changing any window visibility. If the
-    /// journal cannot be committed, no new window is hidden.
+    /// Hides the manageable windows of a desktop. Windows that cannot be controlled
+    /// (typically elevated ones) are skipped and stay visible; only a failure to
+    /// persist the recovery journal cancels the operation.
     /// </summary>
     private bool HideManagedWindows(IEnumerable<IntPtr> handles)
     {
         var candidates = new List<(IntPtr Handle, HiddenWindowRecord Record)>();
-        bool identityCaptureFailed = false;
         foreach (IntPtr h in handles.Distinct())
         {
             if (!Native.IsWindow(h) || !Native.IsWindowVisible(h)) continue;
+            if (IsKnownUnmanageable(h)) continue;
             // A failed mode rollback can leave an off-screen parking record that
             // still contains the only safe restore geometry. Preserve that record
             // when converting the window to ordinary hidden-mode visibility.
@@ -380,22 +394,19 @@ internal sealed class DesktopManager
                 candidates.Add((h, parked));
                 continue;
             }
+            if (ShouldSkipForIntegrity(h, out string reason))
+            {
+                RegisterUnmanageable(h, reason);
+                continue;
+            }
             if (!TryCaptureWindowIdentity(h, out var record))
             {
-                AppLog.Warning(nameof(HideManagedWindows),
-                    $"Skipped HWND={h} because its identity could not be captured safely.");
-                if (Native.IsWindow(h) && Native.IsWindowVisible(h))
-                    RaiseWindowControlWarning(nameof(HideManagedWindows),
-                        "Cannot hide the current desktop safely: the window identity could not be captured", h);
-                identityCaptureFailed = true;
+                RegisterUnmanageable(h, "capture-failed");
                 continue;
             }
             candidates.Add((h, record));
         }
 
-        // Switching with only part of the current desktop hidden would violate the
-        // manager's core invariant. Leave every window untouched in that case.
-        if (identityCaptureFailed) return false;
         if (candidates.Count == 0) return true;
 
         var planned = _hidden.Values.ToDictionary(r => r.Handle);
@@ -408,7 +419,6 @@ internal sealed class DesktopManager
             return false;
         }
 
-        bool hideFailed = false;
         foreach (var candidate in candidates)
         {
             Native.ShowWindow(candidate.Handle, Native.SW_HIDE);
@@ -416,39 +426,89 @@ internal sealed class DesktopManager
                 MatchesWindowIdentity(candidate.Handle, candidate.Record))
             {
                 SetHiddenRecord(candidate.Handle, candidate.Record);
+                continue;
             }
-            else
+            if (!Native.IsWindow(candidate.Handle)) continue; // destroyed mid-operation
+            if (Native.IsWindowVisible(candidate.Handle))
             {
-                hideFailed = true;
-                AppLog.Warning(nameof(HideManagedWindows),
-                    $"Could not verify that HWND={candidate.Handle} was hidden.");
-                if (Native.IsWindow(candidate.Handle) && Native.IsWindowVisible(candidate.Handle))
-                    RaiseWindowControlWarning(nameof(HideManagedWindows),
-                        "Cannot hide the current desktop safely: the window stayed visible after SW_HIDE",
-                        candidate.Handle);
+                RegisterUnmanageable(candidate.Handle, "hide-failed");
+                continue;
             }
+            // Hidden but the handle was reused: bring the replacement back on screen.
+            Native.ShowWindow(candidate.Handle, Native.SW_SHOWNA);
         }
 
-        // Reconcile failed or raced hides with the write-ahead snapshot.
         PersistHidden();
-        if (!hideFailed) return true;
-
-        // Do not continue a desktop transition with a half-hidden source set.
-        // Restore every window hidden by this attempt and leave recovery records
-        // behind for any window that cannot be shown again.
-        foreach (var candidate in candidates)
-            ShowOrUnparkManagedWindow(candidate.Handle);
-        PersistHidden();
-        return false;
+        return true;
     }
 
     private void RaiseWindowControlWarning(string operation, string detail, IntPtr handle = default)
     {
         AppLog.Warning(operation,
             handle != IntPtr.Zero ? $"{detail}; window: {DescribeWindow(handle)}" : detail);
-        if (_windowControlWarningRaised) return;
-        _windowControlWarningRaised = true;
-        WindowControlFailed?.Invoke();
+        // Cancellation-type failures carry no per-window balloon payload; the
+        // skip path (RegisterUnmanageable) reports windows individually.
+        WindowControlFailed?.Invoke(null);
+    }
+
+    /// <summary>该句柄是否已知不可管理；句柄被复用（PID/类名不符）时自动失效并重新检测。</summary>
+    private bool IsKnownUnmanageable(IntPtr h)
+    {
+        if (!_unmanageable.TryGetValue(h, out var info)) return false;
+        if (!Native.IsWindow(h) ||
+            Native.GetWindowThreadProcessId(h, out uint pid) == 0 ||
+            pid != info.ProcessId || Native.GetWindowClass(h) != info.ClassName)
+        {
+            _unmanageable.Remove(h);
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>首次登记一个不可管理窗口：写入跳过集合、记录一条日志并通知 UI 层。</summary>
+    private void RegisterUnmanageable(IntPtr h, string reason)
+    {
+        Native.GetWindowThreadProcessId(h, out uint pid);
+        string processName = "unknown";
+        try
+        {
+            if (pid != 0)
+                using (var process = Process.GetProcessById(checked((int)pid)))
+                    processName = process.ProcessName;
+        }
+        catch { }
+        string title = Native.GetWindowTitle(h);
+        if (title.Length > 60) title = title[..60] + "…";
+        string className = Native.GetWindowClass(h);
+        _unmanageable[h] = new UnmanageableWindow(pid, processName, className, reason);
+
+        AppLog.Warning(nameof(RegisterUnmanageable),
+            $"Skipped unmanageable window (reason={reason}): HWND={h}, title='{title}', " +
+            $"class='{className}', process='{processName}' (PID {pid}); it stays visible.");
+        WindowControlFailed?.Invoke(new UnmanageableWindowInfo(h, processName, title, reason));
+    }
+
+    /// <summary>
+    /// 检测“目标窗口属于提权进程而自身未提权”的情况：UIPI 使这类窗口对
+    /// ShowWindow/SetWindowPos 免疫，直接预先跳过；探测无法判定时保守跳过。
+    /// </summary>
+    private bool ShouldSkipForIntegrity(IntPtr h, out string reason)
+    {
+        reason = "";
+        if (OwnProcessElevated) return false;
+        if (Native.GetWindowThreadProcessId(h, out uint pid) == 0 || pid == 0 || pid == _ownPid)
+            return false;
+        switch (Native.IsProcessElevated(pid))
+        {
+            case true:
+                reason = "elevated";
+                return true;
+            case null:
+                reason = "elevated-or-protected";
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static string DescribeWindow(IntPtr h)
@@ -746,11 +806,14 @@ internal sealed class DesktopManager
                    Native.SWP_NOZORDER | Native.SWP_NOACTIVATE) && !IsWindowOffScreen(h);
     }
 
-    /// <summary>停靠事务：与 HideManagedWindows 相同的写前日志 + 全有或全无契约。</summary>
+    /// <summary>
+    /// Parks the manageable windows of a desktop off-screen. Windows that cannot be
+    /// moved are skipped and stay on screen; only a failure to persist the recovery
+    /// journal cancels the operation.
+    /// </summary>
     private bool ParkManagedWindows(IEnumerable<IntPtr> handles)
     {
         var candidates = new List<ParkCandidate>();
-        bool captureFailed = false;
         foreach (IntPtr h in handles.Distinct())
         {
             if (!Native.IsWindow(h) || !Native.IsWindowVisible(h)) continue;
@@ -758,20 +821,20 @@ internal sealed class DesktopManager
             if (_hidden.TryGetValue(h, out var existing) && existing.Parked &&
                 MatchesWindowIdentity(h, existing) && IsWindowOffScreen(h))
                 continue;
+            if (IsKnownUnmanageable(h)) continue;
+            if (ShouldSkipForIntegrity(h, out string reason))
+            {
+                RegisterUnmanageable(h, reason);
+                continue;
+            }
             if (!TryCaptureParkCandidate(h, out var candidate))
             {
-                AppLog.Warning(nameof(ParkManagedWindows),
-                    $"Skipped HWND={h} because its park placement could not be captured safely.");
-                if (Native.IsWindow(h) && Native.IsWindowVisible(h))
-                    RaiseWindowControlWarning(nameof(ParkManagedWindows),
-                        "Cannot park the current desktop safely: the window placement could not be captured", h);
-                captureFailed = true;
+                RegisterUnmanageable(h, "capture-failed");
                 continue;
             }
             candidates.Add(candidate);
         }
 
-        if (captureFailed) return false;
         if (candidates.Count == 0) return true;
 
         var planned = _hidden.Values.ToDictionary(r => r.Handle);
@@ -784,34 +847,31 @@ internal sealed class DesktopManager
             return false;
         }
 
-        bool parkFailed = false;
         foreach (var c in candidates)
         {
             ApplyPark(c.Handle, c);
             if (IsWindowOffScreen(c.Handle) && MatchesWindowIdentity(c.Handle, c.Record))
             {
                 SetHiddenRecord(c.Handle, c.Record);
+                continue;
             }
-            else
+            if (!Native.IsWindow(c.Handle)) continue; // destroyed mid-operation
+            if (MatchesWindowIdentity(c.Handle, c.Record))
             {
-                parkFailed = true;
+                RegisterUnmanageable(c.Handle, "park-failed");
+                continue;
+            }
+            // The handle was reused while parking: bring the replacement back on screen.
+            if (IsWindowOffScreen(c.Handle))
+            {
+                RestoreParkedWindow(c.Handle, c.Record);
                 AppLog.Warning(nameof(ParkManagedWindows),
-                    $"Could not verify that HWND={c.Handle} was parked.");
-                if (Native.IsWindow(c.Handle) && Native.IsWindowVisible(c.Handle))
-                    RaiseWindowControlWarning(nameof(ParkManagedWindows),
-                        "Cannot park the current desktop safely: the window stayed on screen", c.Handle);
+                    $"HWND={c.Handle} changed identity while parking; restored it to the screen.");
             }
         }
 
         PersistHidden();
-        if (!parkFailed) return true;
-
-        // 不带着只停靠一半的源桌面继续切换：还原本轮停靠的窗口。
-        foreach (var c in candidates)
-            if (RestoreParkedWindow(c.Handle, c.Record))
-                RemoveHiddenRecord(c.Handle);
-        PersistHidden();
-        return false;
+        return true;
     }
 
     /// <summary>把停靠/隐藏窗口恢复（隐藏模式遗留的记录照旧显示）。只处理记录本身。</summary>
@@ -989,6 +1049,8 @@ internal sealed class DesktopManager
     private bool SyncCore()
     {
         bool changed = false;
+        foreach (var h in _unmanageable.Keys.Where(h => !Native.IsWindow(h)).ToList())
+            _unmanageable.Remove(h);
         var currentDevices = Screen.AllScreens.Select(s => s.DeviceName).ToHashSet();
 
         foreach (string dev in currentDevices)
@@ -1058,7 +1120,12 @@ internal sealed class DesktopManager
 
         foreach (var (h, record) in _hidden.ToList())
             if (!MatchesWindowIdentity(h, record))
+            {
+                if (Native.IsWindow(h))
+                    AppLog.Warning(nameof(Sync),
+                        $"Dropping the recovery record of a live HWND={h}: the identity no longer matches.");
                 changed |= RemoveHiddenRecord(h);
+            }
 
         foreach (var h in EnumerateTopLevelWindows())
         {
@@ -1076,15 +1143,26 @@ internal sealed class DesktopManager
             // An application or the user may have shown one of our hidden windows.
             // Visible windows belong to the current desktop and must not remain in
             // the crash-recovery journal, even if already present in that set.
+            if (_hidden.TryGetValue(h, out var journalRecord) && journalRecord.Parked)
+                AppLog.Warning(nameof(Sync),
+                    $"Parked HWND={h} is back on screen; adopting it into the current desktop of '{dev}'.");
             changed |= RemoveHiddenRecord(h);
 
             if (!st.Desktops[st.Current].Contains(h))
             {
                 // Başka bir set'te kayıtlıysa oradan çıkar (monitör değiştirmiş
                 // veya gizliyken uygulama tarafından tekrar gösterilmiş olabilir)
+                bool migrated = false;
                 foreach (var other in _monitors.Values)
                     foreach (var set in other.Desktops)
-                        changed |= set.Remove(h);
+                        if (set.Remove(h))
+                        {
+                            migrated = true;
+                            changed = true;
+                        }
+                if (migrated && !_unmanageable.ContainsKey(h))
+                    AppLog.Warning(nameof(Sync),
+                        $"Visible window HWND={h} migrated into the current desktop of '{dev}'.");
                 changed |= AddWindow(st.Desktops[st.Current], h);
             }
         }
@@ -1130,24 +1208,39 @@ internal sealed class DesktopManager
     public void SwitchRelative(int delta)
     {
         string? dev = Native.GetMonitorDeviceUnderCursor();
-        if (dev == null) return;
+        if (dev == null)
+        {
+            AppLog.Info(nameof(SwitchRelative), "Switch ignored: no monitor under the cursor.");
+            return;
+        }
         Sync();
-        if (!_monitors.TryGetValue(dev, out var st)) return;
+        if (!_monitors.TryGetValue(dev, out var st))
+        {
+            AppLog.Info(nameof(SwitchRelative), $"Switch ignored: unknown monitor '{dev}'.");
+            return;
+        }
 
         int target = st.Current + delta;
         if (target < 0)
         {
+            AppLog.Info(nameof(SwitchRelative), $"Switch edge: already at the first desktop of '{dev}'.");
             DesktopSwitched?.Invoke(BuildInfo(st)); // uçta: sadece OSD göster
             return;
         }
         bool createdDesktop = false;
         if (target >= st.Desktops.Count)
         {
+            // 不可管理窗口（如管理员窗口）始终跟随当前桌面，不能作为"桌面非空"
+            // 的依据；仅剩这类窗口时视同空桌面，避免在末尾无限新建。
+            bool hasEffectiveWindows = st.Desktops[st.Current]
+                .Any(h => Native.IsWindow(h) && !IsKnownUnmanageable(h));
             bool canGrow = delta > 0
                 && st.Desktops.Count < MaxDesktopsPerMonitor
-                && st.Desktops[st.Current].Count > 0; // boş masaüstünden yenisi açılmaz
+                && hasEffectiveWindows; // boş masaüstünden yenisi açılmaz
             if (!canGrow)
             {
+                AppLog.Info(nameof(SwitchRelative),
+                    $"Switch edge: cannot grow past desktop {st.Current} of '{dev}'.");
                 DesktopSwitched?.Invoke(BuildInfo(st));
                 return;
             }
@@ -1155,6 +1248,7 @@ internal sealed class DesktopManager
             createdDesktop = true;
             target = st.Desktops.Count - 1;
         }
+        AppLog.Info(nameof(SwitchRelative), $"Switch requested on '{dev}': {st.Current} -> {target}.");
         if (!SwitchToCore(st, target) && createdDesktop)
         {
             st.Desktops.RemoveAt(st.Desktops.Count - 1);
@@ -1314,6 +1408,8 @@ internal sealed class DesktopManager
         }
 
         SwitchStarting?.Invoke(st.Device, st.Current, target);
+        AppLog.Info(nameof(SwitchToCore),
+            $"Switch begin: '{st.Device}' {st.Current} -> {target}.");
 
         IntPtr fg = Native.GetForegroundWindow();
         if (st.Desktops[st.Current].Contains(fg))
@@ -1375,6 +1471,8 @@ internal sealed class DesktopManager
 
         // The externally visible window state is now complete; commit the model.
         st.Current = target;
+        AppLog.Info(nameof(SwitchToCore),
+            $"Switch committed: '{st.Device}' -> desktop {target}.");
 
         // Odağı hedef masaüstünde en son aktif olan görünür pencereye ver
         IntPtr focus = st.LastActive[target];
@@ -1408,7 +1506,12 @@ internal sealed class DesktopManager
     {
         if (!SharedTaskbar || _switchInProgress) return;
         if (h == IntPtr.Zero || !_hidden.TryGetValue(h, out var record) || !record.Parked) return;
-        if (!MatchesWindowIdentity(h, record)) return;
+        if (!MatchesWindowIdentity(h, record))
+        {
+            AppLog.Warning(nameof(HandleForegroundActivated),
+                $"Parked HWND={h} failed the identity check; taskbar jump ignored.");
+            return;
+        }
 
         _switchInProgress = true;
         try
@@ -1419,6 +1522,8 @@ internal sealed class DesktopManager
                     if (st.Desktops[i].Contains(h))
                     {
                         st.LastActive[i] = h;
+                        AppLog.Info(nameof(HandleForegroundActivated),
+                            $"Taskbar jump: HWND={h} -> '{st.Device}' desktop {i}.");
                         SwitchToCore(st, i);
                         return;
                     }
@@ -1429,6 +1534,8 @@ internal sealed class DesktopManager
                 : Native.GetMonitorDeviceUnderCursor();
             if (dev != null && _monitors.TryGetValue(dev, out var adopt))
             {
+                AppLog.Warning(nameof(HandleForegroundActivated),
+                    $"Parked HWND={h} belongs to no desktop; adopting it into the current desktop of '{dev}'.");
                 AddWindow(adopt.Desktops[adopt.Current], h);
                 UnparkManagedWindow(h);
                 PersistHidden();
@@ -1566,12 +1673,25 @@ internal sealed class DesktopManager
 
     // ---------- pencere ve masaüstü taşıma ----------
 
-    /// <summary>Aktif pencereyi kendi monitöründe bitişik masaüstüne taşır ve oraya geçer.
-    /// Son masaüstünden ileri taşıma yeni masaüstü oluşturur.</summary>
+    /// <summary>Moves the active window to the adjacent desktop on its monitor and follows it.
+    /// Moving forward from the last desktop creates a new desktop. An unmanageable window
+    /// (e.g. an elevated one) is not moved and no desktop is created; the UI is notified.</summary>
     public void MoveActiveWindow(int delta)
     {
         IntPtr fg = Native.GetForegroundWindow();
         if (fg == IntPtr.Zero || !IsEligible(fg)) return;
+        // 活动窗口无法控制（如管理员窗口）时，移动没有意义：不新建桌面、
+        // 不移动，复用跳过通知（托盘气泡按会话去重）。
+        if (IsKnownUnmanageable(fg))
+        {
+            RegisterUnmanageable(fg, _unmanageable[fg].Reason);
+            return;
+        }
+        if (ShouldSkipForIntegrity(fg, out string skipReason))
+        {
+            RegisterUnmanageable(fg, skipReason);
+            return;
+        }
         Sync();
         string? dev = Native.GetMonitorDeviceOfWindow(fg);
         if (dev == null || !_monitors.TryGetValue(dev, out var st)) return;

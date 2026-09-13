@@ -22,6 +22,7 @@ internal sealed class TrayApp : ApplicationContext
     private IntPtr _foregroundHook;
     private bool _exiting;
     private bool _resourcesDisposed;
+    private bool _windowWarningShown;
     private int _idleSyncPasses;
 
     public TrayApp()
@@ -54,11 +55,12 @@ internal sealed class TrayApp : ApplicationContext
                 _animator.Commit(info.Device);
             _osd.ShowSwitch(info);
         };
-        _manager.WindowControlFailed += () =>
+        _manager.WindowControlFailed += info =>
         {
-            AppLog.Warning(nameof(DesktopManager.WindowControlFailed),
-                $"Showing warning balloon: {L.T("msg.windowControlFail")}");
-            _tray.ShowBalloonTip(5000, "IndepenDesk", L.T("msg.windowControlFail"), ToolTipIcon.Warning);
+            if (info != null)
+                ShowWindowWarning(L.F("msg.windowSkipped", info.Title, info.ProcessName));
+            else
+                ShowWindowWarning(L.T("msg.windowControlFail"));
         };
 
         RegisterHotkeys();
@@ -131,6 +133,24 @@ internal sealed class TrayApp : ApplicationContext
         };
         menu.Items.Add(sharedItem);
 
+        var warnItem = new ToolStripMenuItem(L.T("menu.warnUnmanageable"))
+        {
+            Checked = SettingsStore.GetBool("warnUnmanageable", true),
+            CheckOnClick = true
+        };
+        bool warnRestoring = false;
+        warnItem.CheckedChanged += (_, _) =>
+        {
+            if (warnRestoring) return;
+            if (SettingsStore.SetBool("warnUnmanageable", warnItem.Checked)) return;
+            warnRestoring = true;
+            warnItem.Checked = !warnItem.Checked;
+            warnRestoring = false;
+            AppLog.Warning(nameof(BuildMenu),
+                "Could not persist the warning notification preference.");
+        };
+        menu.Items.Add(warnItem);
+
         menu.Items.Add(L.T("menu.help"), null, (_, _) => HelpForm.ShowHelp());
         menu.Items.Add(new ToolStripSeparator());
 
@@ -193,6 +213,16 @@ internal sealed class TrayApp : ApplicationContext
 
     private static string Truncate(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "…";
 
+    /// <summary>每个会话最多弹出一条“窗口无法管理”气泡；开关关闭时不弹也不占用本次次数。</summary>
+    private void ShowWindowWarning(string text)
+    {
+        if (_windowWarningShown) return;
+        if (!SettingsStore.GetBool("warnUnmanageable", true)) return;
+        _windowWarningShown = true;
+        AppLog.Info(nameof(ShowWindowWarning), $"Showing warning balloon: {Truncate(text, 200)}");
+        _tray.ShowBalloonTip(5000, "IndepenDesk", Truncate(text, 200), ToolTipIcon.Warning);
+    }
+
     private void OnSyncTick()
     {
         if (OverviewForm.IsOpen) return;
@@ -230,6 +260,7 @@ internal sealed class TrayApp : ApplicationContext
 
     private void OnHotkey(int id)
     {
+        AppLog.Info(nameof(OnHotkey), $"Hotkey id={id} received.");
         switch (id)
         {
             case HkPrev: _manager.SwitchRelative(-1); break;

@@ -45,6 +45,10 @@ internal static class Native
     public const uint WM_GETICON = 0x007F;
     public const int GCLP_HICONSM = -34;
 
+    public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    public const uint TOKEN_QUERY = 0x0008;
+    public const int TokenElevation = 20;
+
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     [DllImport("user32.dll")]
@@ -146,6 +150,22 @@ internal static class Native
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr FindWindow(string? lpClassName, string? lpWindowName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr processHandle, uint desiredAccess, out IntPtr tokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetTokenInformation(IntPtr tokenHandle, int tokenInformationClass,
+        out int tokenInformation, int tokenInformationLength, out int returnLength);
 
     public delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint dwEventThread, uint dwmsEventTime);
@@ -249,5 +269,48 @@ internal static class Native
             return (Icon)Icon.FromHandle(hIcon).Clone();
         }
         catch { return null; }
+    }
+
+    /// <summary>True when this process runs with an elevated (administrator) token.</summary>
+    public static bool IsOwnProcessElevated()
+    {
+        try
+        {
+            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, out IntPtr token)) return false;
+            try
+            {
+                return GetTokenInformation(token, TokenElevation, out int elevated, sizeof(int), out _)
+                       && elevated != 0;
+            }
+            finally { CloseHandle(token); }
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Elevation state of another process; null when it cannot be determined
+    /// (protected process, access denied or the process is exiting).
+    /// </summary>
+    public static bool? IsProcessElevated(uint pid)
+    {
+        IntPtr process = IntPtr.Zero;
+        try
+        {
+            process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+            if (process == IntPtr.Zero) return null;
+            if (!OpenProcessToken(process, TOKEN_QUERY, out IntPtr token)) return null;
+            try
+            {
+                if (!GetTokenInformation(token, TokenElevation, out int elevated, sizeof(int), out _))
+                    return null;
+                return elevated != 0;
+            }
+            finally { CloseHandle(token); }
+        }
+        catch { return null; }
+        finally
+        {
+            if (process != IntPtr.Zero) CloseHandle(process);
+        }
     }
 }

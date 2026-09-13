@@ -65,6 +65,7 @@ La modalità opzionale **barra delle applicazioni condivisa** (menu della barra 
 ## Limitazioni note
 
 - Le finestre delle app con privilegi elevati non possono essere nascoste, a meno che IndepenDesk non sia eseguito come amministratore.
+- Le gesture "Collegamento personalizzato" del touchpad sono pressioni di tasti sintetiche: quando una finestra con privilegi elevati è attiva, la sicurezza di Windows (UIPI) le ignora e le gesture smettono di funzionare. Le scorciatoie della tastiera fisica e il menu della barra restano utilizzabili.
 - In modalità barra condivisa, le finestre parcheggiate continuano a essere renderizzate (uso GPU/CPU leggermente superiore rispetto alla nasconditura). Se il processo viene terminato in questa modalità, riavvia IndepenDesk 0.4.4+ per riportare a schermo le finestre parcheggiate (le versioni precedenti non leggono il formato v3 del journal).
 - Il nativo `Win+Ctrl+←/→` attiva ancora il cambio globale — basta non usarlo.
 - `Ctrl+Alt+←/→` può entrare in conflitto con le scorciatoie Intel "ruota schermo"; disattivale se necessario.
