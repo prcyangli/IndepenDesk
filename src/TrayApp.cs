@@ -20,6 +20,7 @@ internal sealed class TrayApp : ApplicationContext
     private readonly System.Windows.Forms.Timer _syncTimer = new() { Interval = 1000 };
     private Native.WinEventDelegate? _foregroundProc;
     private IntPtr _foregroundHook;
+    private IntPtr _minimizeHook;
     private bool _exiting;
     private bool _resourcesDisposed;
     private bool _windowWarningShown;
@@ -75,6 +76,14 @@ internal sealed class TrayApp : ApplicationContext
         if (_foregroundHook == IntPtr.Zero)
             AppLog.Warning(nameof(TrayApp),
                 "SetWinEventHook(EVENT_SYSTEM_FOREGROUND) failed; taskbar jump is unavailable.");
+
+        _minimizeHook = Native.SetWinEventHook(
+            Native.EVENT_SYSTEM_MINIMIZESTART, Native.EVENT_SYSTEM_MINIMIZEEND,
+            IntPtr.Zero, foregroundProc, 0, 0,
+            Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
+        if (_minimizeHook == IntPtr.Zero)
+            AppLog.Warning(nameof(TrayApp),
+                "SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART/END) failed; minimize focus suppression is unavailable.");
 
         _manager.Sync();
         string autostart = StartupManager.IsPackaged
@@ -254,8 +263,19 @@ internal sealed class TrayApp : ApplicationContext
     private void OnForegroundEvent(IntPtr hook, uint eventType, IntPtr hwnd, int idObject,
         int idChild, uint thread, uint time)
     {
-        if (idObject == Native.OBJID_WINDOW && hwnd != IntPtr.Zero)
-            _manager.HandleForegroundActivated(hwnd);
+        if (idObject != Native.OBJID_WINDOW || hwnd == IntPtr.Zero) return;
+        switch (eventType)
+        {
+            case Native.EVENT_SYSTEM_FOREGROUND:
+                _manager.HandleForegroundActivated(hwnd);
+                break;
+            case Native.EVENT_SYSTEM_MINIMIZESTART:
+                _manager.HandleMinimizeStarted(hwnd);
+                break;
+            case Native.EVENT_SYSTEM_MINIMIZEEND:
+                _manager.HandleMinimizeEnded(hwnd);
+                break;
+        }
     }
 
     private void OnHotkey(int id)
@@ -378,6 +398,11 @@ internal sealed class TrayApp : ApplicationContext
         {
             Native.UnhookWinEvent(_foregroundHook);
             _foregroundHook = IntPtr.Zero;
+        }
+        if (_minimizeHook != IntPtr.Zero)
+        {
+            Native.UnhookWinEvent(_minimizeHook);
+            _minimizeHook = IntPtr.Zero;
         }
         _foregroundProc = null;
         _animator.Dispose();

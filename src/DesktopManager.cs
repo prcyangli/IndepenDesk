@@ -66,6 +66,14 @@ internal sealed class DesktopManager
     private const int HiddenStateVersion = 3;
     private const string EmptyPersistedState = "<empty>";
 
+    // 停靠校验失败可能只是窗口侧的瞬时否决（窗口正被拖动、应用做了位置钳制等）：
+    // 失败后整批退避重试，总计最多 3 次尝试，每轮间隔 250 ms，整场切换的额外延迟 ≤500 ms。
+    private const int ParkAttemptCount = 3;
+    private const int ParkRetryDelayMs = 250;
+    private const int ParkAnchorThickness = 2;
+    private const int ParkRectTolerance = 2;
+    private const int MinimizeForegroundSuppressMs = 750;
+
     private readonly Dictionary<string, MonitorState> _monitors = new();
     private readonly Dictionary<IntPtr, HiddenWindowRecord> _hidden = new();
     private readonly HashSet<HashSet<IntPtr>> _retainedEmptyDesktops = new(ReferenceEqualityComparer.Instance);
@@ -80,6 +88,11 @@ internal sealed class DesktopManager
     private bool _syncInProgress;
     private bool _stateFileBlocked;
     private bool _switchInProgress;
+    private IntPtr _minimizeSource;
+    private long _suppressParkedForegroundUntil;
+    private IntPtr _explicitMinimizeRestore;
+    private long _explicitMinimizeRestoreUntil;
+    private readonly Dictionary<IntPtr, long> _internalMinimizeUntil = new();
 
     /// <summary>自身是否以管理员权限运行；提权后可控制同用户的全部窗口，无需预检测。</summary>
     private static readonly bool OwnProcessElevated = Native.IsOwnProcessElevated();
@@ -375,9 +388,9 @@ internal sealed class DesktopManager
     }
 
     /// <summary>
-    /// Hides the manageable windows of a desktop. Windows that cannot be controlled
-    /// (typically elevated ones) are skipped and stay visible; only a failure to
-    /// persist the recovery journal cancels the operation.
+    /// Hides the manageable windows of a desktop. Windows that are known to be
+    /// outside our integrity boundary are skipped and stay visible. Operational
+    /// failures are transient: roll this attempt back and let a later switch retry.
     /// </summary>
     private bool HideManagedWindows(IEnumerable<IntPtr> handles)
     {
@@ -406,8 +419,11 @@ internal sealed class DesktopManager
             }
             if (!TryCaptureWindowIdentity(h, out var record))
             {
-                RegisterUnmanageable(h, "capture-failed");
-                continue;
+                if (!Native.IsWindow(h)) continue; // destroyed while being captured
+                RaiseWindowControlWarning(nameof(HideManagedWindows),
+                    "Cannot hide the current desktop safely: window state capture failed; switch cancelled and will be retried",
+                    h);
+                return false;
             }
             candidates.Add((h, record));
         }
@@ -424,27 +440,79 @@ internal sealed class DesktopManager
             return false;
         }
 
+        var previousRecords = candidates
+            .Where(c => _hidden.ContainsKey(c.Handle))
+            .ToDictionary(c => c.Handle, c => _hidden[c.Handle]);
+        var touched = new List<IntPtr>();
         foreach (var candidate in candidates)
         {
+            // The durable snapshot already contains this record. Add it to the
+            // in-memory journal before touching the HWND so rollback can recover
+            // even when verification itself fails.
+            SetHiddenRecord(candidate.Handle, candidate.Record);
+            touched.Add(candidate.Handle);
             Native.ShowWindow(candidate.Handle, Native.SW_HIDE);
             if (!Native.IsWindowVisible(candidate.Handle) &&
                 MatchesWindowIdentity(candidate.Handle, candidate.Record))
+                continue;
+
+            if (!Native.IsWindow(candidate.Handle))
             {
-                SetHiddenRecord(candidate.Handle, candidate.Record);
+                RemoveHiddenRecord(candidate.Handle);
+                touched.RemoveAt(touched.Count - 1);
                 continue;
             }
-            if (!Native.IsWindow(candidate.Handle)) continue; // destroyed mid-operation
-            if (Native.IsWindowVisible(candidate.Handle))
+            if (!MatchesWindowIdentity(candidate.Handle, candidate.Record))
             {
-                RegisterUnmanageable(candidate.Handle, "hide-failed");
+                RemoveHiddenRecord(candidate.Handle);
+                touched.RemoveAt(touched.Count - 1);
+                // Hidden but the handle was reused: bring the replacement back on screen.
+                if (!Native.IsWindowVisible(candidate.Handle))
+                    Native.ShowWindow(candidate.Handle, Native.SW_SHOWNA);
                 continue;
             }
-            // Hidden but the handle was reused: bring the replacement back on screen.
-            Native.ShowWindow(candidate.Handle, Native.SW_SHOWNA);
+
+            bool rolledBack = RollBackHiddenAttempt(touched, previousRecords);
+            PersistHidden();
+            RaiseWindowControlWarning(nameof(HideManagedWindows),
+                rolledBack
+                    ? "A normal window could not be hidden; switch cancelled and all changed windows were restored"
+                    : "A normal window could not be hidden; switch cancelled but rollback was incomplete (recovery records retained)",
+                candidate.Handle);
+            return false;
         }
 
         PersistHidden();
         return true;
+    }
+
+    private bool RollBackHiddenAttempt(IEnumerable<IntPtr> handles,
+        IReadOnlyDictionary<IntPtr, HiddenWindowRecord> previousRecords)
+    {
+        bool success = true;
+        foreach (IntPtr h in handles.Reverse())
+        {
+            if (!Native.IsWindow(h))
+            {
+                RemoveHiddenRecord(h);
+                continue;
+            }
+
+            if (previousRecords.TryGetValue(h, out var previous))
+            {
+                // This was already a journaled off-screen window before the mode
+                // conversion attempt. Restore only its visibility and retain the
+                // original recovery geometry.
+                if (!Native.IsWindowVisible(h))
+                    Native.ShowWindow(h, Native.SW_SHOWNA);
+                SetHiddenRecord(h, previous);
+                success &= Native.IsWindowVisible(h);
+                continue;
+            }
+
+            success &= ShowManagedWindow(h);
+        }
+        return success;
     }
 
     private void RaiseWindowControlWarning(string operation, string detail, IntPtr handle = default)
@@ -470,7 +538,7 @@ internal sealed class DesktopManager
         return true;
     }
 
-    /// <summary>首次登记一个不可管理窗口：写入跳过集合、记录一条日志并通知 UI 层。</summary>
+    /// <summary>首次登记一个跨完整性边界、确定无法管理的窗口。</summary>
     private void RegisterUnmanageable(IntPtr h, string reason)
     {
         Native.GetWindowThreadProcessId(h, out uint pid);
@@ -667,7 +735,142 @@ internal sealed class DesktopManager
         return new Rectangle(left - 30000 - size.Width, top, Math.Max(1, size.Width), Math.Max(1, size.Height));
     }
 
-    private sealed record ParkCandidate(IntPtr Handle, HiddenWindowRecord Record, Rectangle ParkRect);
+    /// <summary>
+    /// SetWindowPlacement keeps a minimized window's restore rectangle reachable and
+    /// moves a completely off-screen rectangle back onto a monitor. Park minimized
+    /// windows against an exposed monitor edge instead: only a one-pixel strip/corner
+    /// remains in the virtual screen while the window itself stays minimized.
+    /// </summary>
+    private static bool TryGetMinimizedParkRect(string? device, Size size, out Rectangle park)
+    {
+        park = Rectangle.Empty;
+        Screen? target = device != null
+            ? Screen.AllScreens.FirstOrDefault(s => s.DeviceName == device)
+            : null;
+        if (target == null || size.Width <= 0 || size.Height <= 0) return false;
+
+        Rectangle b = target.Bounds;
+        int w = Math.Max(1, size.Width);
+        int h = Math.Max(1, size.Height);
+        var candidates = new[]
+        {
+            // Four straight edges work well for row/column monitor layouts.
+            new Rectangle(b.Left - w + 1, b.Top, w, h),
+            new Rectangle(b.Right - 1, b.Top, w, h),
+            new Rectangle(b.Left, b.Top - h + 1, w, h),
+            new Rectangle(b.Left, b.Bottom - 1, w, h),
+            // Corners minimize the visible intersection on isolated displays.
+            new Rectangle(b.Left - w + 1, b.Top - h + 1, w, h),
+            new Rectangle(b.Right - 1, b.Top - h + 1, w, h),
+            new Rectangle(b.Left - w + 1, b.Bottom - 1, w, h),
+            new Rectangle(b.Right - 1, b.Bottom - 1, w, h)
+        };
+
+        var viable = candidates
+            .Where(IsEffectivelyParkedRect)
+            .Where(r =>
+            {
+                Rectangle anchor = Rectangle.Intersect(r, b);
+                return anchor.Width > 0 && anchor.Height > 0;
+            })
+            .OrderBy(VisibleIntersectionPixels)
+            .ToList();
+        if (viable.Count == 0) return false;
+        park = viable[0];
+        return true;
+    }
+
+    private static long VisibleIntersectionPixels(Rectangle r)
+    {
+        long total = 0;
+        foreach (Screen screen in Screen.AllScreens)
+        {
+            Rectangle visible = Rectangle.Intersect(r, screen.Bounds);
+            if (visible.Width > 0 && visible.Height > 0)
+                total += (long)visible.Width * visible.Height;
+        }
+        return total;
+    }
+
+    /// <summary>A parked rectangle may retain only a thin anchor on each intersected display.</summary>
+    private static bool IsEffectivelyParkedRect(Rectangle r)
+    {
+        foreach (Screen screen in Screen.AllScreens)
+        {
+            Rectangle visible = Rectangle.Intersect(r, screen.Bounds);
+            if (visible.Width <= 0 || visible.Height <= 0) continue;
+            if (visible.Width > ParkAnchorThickness && visible.Height > ParkAnchorThickness)
+                return false;
+        }
+        return true; // A strictly off-screen rectangle is parked too.
+    }
+
+    private static bool RectApproximatelyEquals(Rectangle actual, Rectangle expected) =>
+        Math.Abs(actual.Left - expected.Left) <= ParkRectTolerance &&
+        Math.Abs(actual.Top - expected.Top) <= ParkRectTolerance &&
+        Math.Abs(actual.Right - expected.Right) <= ParkRectTolerance &&
+        Math.Abs(actual.Bottom - expected.Bottom) <= ParkRectTolerance;
+
+    private static bool WasSavedMinimized(HiddenWindowRecord record) =>
+        record.SavedShowCmd is Native.SW_SHOWMINIMIZED or Native.SW_MINIMIZE or Native.SW_SHOWMINNOACTIVE;
+
+    private static bool TryGetEffectiveWindowRect(IntPtr h, out Rectangle rect)
+    {
+        rect = Rectangle.Empty;
+        if (Native.IsIconic(h))
+        {
+            var placement = new Native.WINDOWPLACEMENT
+            {
+                length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>()
+            };
+            if (!Native.GetWindowPlacement(h, ref placement)) return false;
+            rect = FromRECT(placement.rcNormalPosition);
+            return rect.Width > 0 && rect.Height > 0;
+        }
+
+        if (!Native.GetWindowRect(h, out var wr)) return false;
+        rect = FromRECT(wr);
+        return rect.Width > 0 && rect.Height > 0;
+    }
+
+    /// <summary>
+    /// Journal-aware parking check. Ordinary user windows still use the strict
+    /// IsWindowOffScreen predicate. A window that we recorded while minimized stays
+    /// logically parked for as long as it remains iconic: Chromium and other apps
+    /// may rewrite rcNormalPosition back on-screen without actually restoring the
+    /// window. Once restored, only the thin edge-anchor representation is accepted.
+    /// </summary>
+    private static bool IsManagedWindowParked(IntPtr h, HiddenWindowRecord record)
+    {
+        if (!record.Parked) return false;
+        bool iconic = Native.IsIconic(h);
+        if (WasSavedMinimized(record) && iconic) return true;
+        if (!TryGetEffectiveWindowRect(h, out Rectangle actual)) return false;
+        if (!IntersectsAnyScreen(actual)) return true;
+        if (!WasSavedMinimized(record) || !IsEffectivelyParkedRect(actual)) return false;
+
+        var saved = Rectangle.FromLTRB(
+            record.NormalLeft, record.NormalTop, record.NormalRight, record.NormalBottom);
+        return TryGetMinimizedParkRect(record.ParkMonitor, saved.Size, out Rectangle expected) &&
+               RectApproximatelyEquals(actual, expected);
+    }
+
+    private sealed record ParkCandidate(
+        IntPtr Handle, HiddenWindowRecord Record, Rectangle ParkRect, bool WasIconic);
+
+    private enum ParkOutcome { Parked, Failed, Destroyed, IdentityMismatch }
+
+    /// <summary>一次停靠尝试的诊断现场；不影响业务判定，只用于最终 WARN 与重试 INFO。</summary>
+    private sealed record ParkAttemptDiag(
+        bool ApiSucceeded,
+        int? Win32Error,
+        bool IdentityMatches,
+        bool IsVisible,
+        bool IsIconic,
+        bool IsZoomed,
+        Rectangle? WindowRect,
+        Rectangle? NormalRect,
+        uint? ShowCmd);
 
     private bool TryCaptureParkCandidate(IntPtr h, out ParkCandidate candidate)
     {
@@ -685,9 +888,15 @@ internal sealed class DesktopManager
         var size = iconic ? normal.Size : new Size(wr.Right - wr.Left, wr.Bottom - wr.Top);
         if (size.Width <= 0 || size.Height <= 0) return false;
 
-        Rectangle park = GetParkRect(dev, size);
+        Rectangle park;
         if (iconic)
-            park = new Rectangle(park.X, park.Y, normal.Width, normal.Height);
+        {
+            if (!TryGetMinimizedParkRect(dev, normal.Size, out park)) return false;
+        }
+        else
+        {
+            park = GetParkRect(dev, size);
+        }
 
         var record = identity with
         {
@@ -699,29 +908,82 @@ internal sealed class DesktopManager
             SavedShowCmd = (int)pl.showCmd,
             ParkMonitor = dev
         };
-        candidate = new ParkCandidate(h, record, park);
+        candidate = new ParkCandidate(h, record, park, iconic);
         return true;
     }
 
-    private static void ApplyPark(IntPtr h, ParkCandidate c)
+    /// <summary>单次停靠尝试：API 返回立即保存结果与错误码，再采集现场并校验是否完全离屏。
+    /// 只刷新当前窗口状态，绝不改动第一次捕获的恢复几何（c.Record 保持不变）。</summary>
+    private (ParkOutcome Outcome, ParkAttemptDiag? Diag) TryParkOnce(ParkCandidate c)
     {
-        if (Native.IsIconic(h))
+        if (!Native.IsWindow(c.Handle)) return (ParkOutcome.Destroyed, null);
+        if (!MatchesWindowIdentity(c.Handle, c.Record)) return (ParkOutcome.IdentityMismatch, null);
+
+        bool applied;
+        int? win32Error = null;
+        bool iconic = Native.IsIconic(c.Handle);
+        if (c.WasIconic)
         {
+            if (!iconic)
+            {
+                Rectangle? changedRect = Native.GetWindowRect(c.Handle, out var changed)
+                    ? FromRECT(changed)
+                    : null;
+                return (ParkOutcome.Failed,
+                    new ParkAttemptDiag(false, null, true, Native.IsWindowVisible(c.Handle), false,
+                        Native.IsZoomed(c.Handle), changedRect, null, null));
+            }
             var pl = new Native.WINDOWPLACEMENT { length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>() };
-            if (!Native.GetWindowPlacement(h, ref pl)) return;
-            pl.showCmd = Native.SW_SHOWMINIMIZED;
-            pl.rcNormalPosition = ToRECT(c.ParkRect);
-            Native.SetWindowPlacement(h, ref pl);
+            if (Native.GetWindowPlacement(c.Handle, ref pl))
+            {
+                // 保留原 flags，仅改 showCmd 与还原位置：最小化窗口停靠后仍保持最小化。
+                pl.showCmd = Native.SW_SHOWMINIMIZED;
+                pl.rcNormalPosition = ToRECT(c.ParkRect);
+                applied = Native.SetWindowPlacement(c.Handle, ref pl);
+            }
+            else
+            {
+                applied = false;
+            }
+            if (!applied) win32Error = Marshal.GetLastWin32Error();
         }
         else
         {
-            Native.SetWindowPos(h, IntPtr.Zero, c.ParkRect.X, c.ParkRect.Y, 0, 0,
+            applied = Native.SetWindowPos(c.Handle, IntPtr.Zero, c.ParkRect.X, c.ParkRect.Y, 0, 0,
                 Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+            if (!applied) win32Error = Marshal.GetLastWin32Error();
         }
+
+        bool visible = Native.IsWindowVisible(c.Handle);
+        bool zoomed = Native.IsZoomed(c.Handle);
+        Rectangle? windowRect = Native.GetWindowRect(c.Handle, out var wr) ? FromRECT(wr) : null;
+        uint? showCmd = null;
+        Rectangle? normalRect = null;
+        var placement = new Native.WINDOWPLACEMENT { length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>() };
+        if (Native.GetWindowPlacement(c.Handle, ref placement))
+        {
+            showCmd = placement.showCmd;
+            normalRect = FromRECT(placement.rcNormalPosition);
+        }
+
+        bool parked;
+        if (c.WasIconic)
+        {
+            parked = applied && Native.IsIconic(c.Handle) && normalRect.HasValue &&
+                     RectApproximatelyEquals(normalRect.Value, c.ParkRect) &&
+                     IsEffectivelyParkedRect(normalRect.Value);
+        }
+        else
+        {
+            parked = applied && IsWindowOffScreen(c.Handle);
+        }
+        return (parked ? ParkOutcome.Parked : ParkOutcome.Failed,
+            new ParkAttemptDiag(applied, win32Error, true, visible, iconic, zoomed,
+                windowRect, normalRect, showCmd));
     }
 
     /// <summary>把停靠窗口按记录还原到屏幕内；不动 _hidden 和日志（由调用方负责）。</summary>
-    private static bool RestoreParkedWindow(IntPtr h, HiddenWindowRecord rec)
+    private bool RestoreParkedWindow(IntPtr h, HiddenWindowRecord rec)
     {
         var pl = new Native.WINDOWPLACEMENT { length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>() };
         bool hasPlacement = Native.GetWindowPlacement(h, ref pl);
@@ -742,11 +1004,8 @@ internal sealed class DesktopManager
         if (Native.IsIconic(h))
         {
             // 用户最小化了停靠窗口（如 Win+D）：保持最小化，只把还原位置放回屏幕内。
-            if (!hasPlacement) return false;
-            pl.showCmd = Native.SW_SHOWMINIMIZED;
-            pl.rcNormalPosition = ToRECT(saved);
-            Native.SetWindowPlacement(h, ref pl);
-            return !IsWindowOffScreen(h);
+            // 25H2 起 SetWindowPlacement 忽略 rcNormalPosition，须走显示→落位→再最小化链路。
+            return RestoreIconicPlacement(h, saved);
         }
 
         if (Native.IsZoomed(h))
@@ -772,7 +1031,7 @@ internal sealed class DesktopManager
     }
 
     /// <summary>Bring a visible, unjournaled window back after its display disappears.</summary>
-    private static bool RestoreUnjournaledOffScreenWindow(IntPtr h)
+    private bool RestoreUnjournaledOffScreenWindow(IntPtr h)
     {
         if (!IsWindowOffScreen(h)) return true;
 
@@ -799,10 +1058,8 @@ internal sealed class DesktopManager
 
         if (Native.IsIconic(h))
         {
-            if (!hasPlacement) return false;
-            placement.showCmd = Native.SW_SHOWMINIMIZED;
-            placement.rcNormalPosition = ToRECT(saved);
-            return Native.SetWindowPlacement(h, ref placement) && !IsWindowOffScreen(h);
+            // 25H2 起 SetWindowPlacement 忽略 rcNormalPosition，须走显示→落位→再最小化链路。
+            return RestoreIconicPlacement(h, saved);
         }
 
         if (Native.IsZoomed(h) && hasPlacement)
@@ -820,9 +1077,56 @@ internal sealed class DesktopManager
     }
 
     /// <summary>
-    /// Parks the manageable windows of a desktop off-screen. Windows that cannot be
-    /// moved are skipped and stay on screen; only a failure to persist the recovery
-    /// journal cancels the operation.
+    /// 把最小化窗口的还原位置落回屏幕内（保持最小化）。Windows 11 25H2 (build 26200) 起
+    /// SetWindowPlacement 会忽略 rcNormalPosition（原生 DefWindowProc 窗口亦已复现）；
+    /// 可行写法：短暂还原（SW_SHOWNOACTIVATE，不激活、不抢焦点）→ SetWindowPos 落位 → 再次最小化，
+    /// 还原位置会随正常矩形自动落位。
+    /// </summary>
+    private bool RestoreIconicPlacement(IntPtr h, Rectangle saved)
+    {
+        if (!Native.IsWindow(h)) return false;
+        if (!Native.IsIconic(h)) return !IsWindowOffScreen(h);
+        var originalPlacement = new Native.WINDOWPLACEMENT
+        {
+            length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>()
+        };
+        bool hasPlacement = Native.GetWindowPlacement(h, ref originalPlacement);
+        Native.ShowWindow(h, Native.SW_SHOWNOACTIVATE);
+        if (Native.IsIconic(h)) return false;
+        bool moved = Native.SetWindowPos(h, IntPtr.Zero, saved.X, saved.Y, saved.Width, saved.Height,
+            Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+        if (!moved || IsWindowOffScreen(h))
+        {
+            // 落位失败时收回为最小化，避免把窗口留在屏外的可见状态。
+            MarkInternalMinimize(h);
+            Native.ShowWindow(h, Native.SW_SHOWMINNOACTIVE);
+            return false;
+        }
+        MarkInternalMinimize(h);
+        Native.ShowWindow(h, Native.SW_SHOWMINNOACTIVE);
+        if (hasPlacement)
+        {
+            // Restore flags such as WPF_RESTORETOMAXIMIZED after the temporary
+            // no-activate restore. The normal rectangle is on-screen here, so it
+            // is not subject to the off-screen correction that broke parking.
+            originalPlacement.showCmd = Native.SW_SHOWMINIMIZED;
+            originalPlacement.rcNormalPosition = ToRECT(saved);
+            Native.SetWindowPlacement(h, ref originalPlacement);
+        }
+
+        var verified = new Native.WINDOWPLACEMENT
+        {
+            length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>()
+        };
+        return Native.IsIconic(h) && Native.GetWindowPlacement(h, ref verified) &&
+               RectApproximatelyEquals(FromRECT(verified.rcNormalPosition), saved) &&
+               !IsWindowOffScreen(h);
+    }
+
+    /// <summary>
+    /// Parks the manageable windows of a desktop off-screen. Windows that are known
+    /// to be outside our integrity boundary are skipped and stay visible. Operational
+    /// failures are transient: roll this attempt back and let a later switch retry.
     /// </summary>
     private bool ParkManagedWindows(IEnumerable<IntPtr> handles)
     {
@@ -832,7 +1136,7 @@ internal sealed class DesktopManager
             if (!Native.IsWindow(h) || !Native.IsWindowVisible(h)) continue;
             // 已经停靠的窗口保持原样（保留其原始屏幕位置记录）。
             if (_hidden.TryGetValue(h, out var existing) && existing.Parked &&
-                MatchesWindowIdentity(h, existing) && IsWindowOffScreen(h))
+                MatchesWindowIdentity(h, existing) && IsManagedWindowParked(h, existing))
                 continue;
             if (IsKnownUnmanageable(h))
             {
@@ -846,8 +1150,11 @@ internal sealed class DesktopManager
             }
             if (!TryCaptureParkCandidate(h, out var candidate))
             {
-                RegisterUnmanageable(h, "capture-failed");
-                continue;
+                if (!Native.IsWindow(h)) continue; // destroyed while being captured
+                RaiseWindowControlWarning(nameof(ParkManagedWindows),
+                    "Cannot park the current desktop safely: window state capture failed; switch cancelled and will be retried",
+                    h);
+                return false;
             }
             candidates.Add(candidate);
         }
@@ -864,31 +1171,121 @@ internal sealed class DesktopManager
             return false;
         }
 
+        var touched = new List<IntPtr>();
+        var diags = new Dictionary<IntPtr, ParkAttemptDiag>();
+        var pending = new List<ParkCandidate>();
         foreach (var c in candidates)
         {
-            ApplyPark(c.Handle, c);
-            if (IsWindowOffScreen(c.Handle) && MatchesWindowIdentity(c.Handle, c.Record))
+            // The durable snapshot already contains this record. Add it to the
+            // in-memory journal before touching the HWND so a failed verification
+            // can be rolled back through the normal recovery path.
+            SetHiddenRecord(c.Handle, c.Record);
+            touched.Add(c.Handle);
+            var (outcome, diag) = TryParkOnce(c);
+            if (RouteParkOutcome(c, outcome, diag, touched, diags))
+                pending.Add(c);
+        }
+
+        // 批量退避重试：每轮全组只等一次 250 ms，失败窗口数量不放大总延迟。
+        for (int attempt = 2; pending.Count > 0 && attempt <= ParkAttemptCount; attempt++)
+        {
+            AppLog.Info(nameof(ParkManagedWindows),
+                $"Parking verification failed for {pending.Count} window(s) " +
+                $"({string.Join(", ", pending.Select(c => c.Handle))}); " +
+                $"retry {attempt}/{ParkAttemptCount} scheduled in {ParkRetryDelayMs} ms.");
+            Thread.Sleep(ParkRetryDelayMs);
+            var remaining = new List<ParkCandidate>();
+            foreach (var c in pending)
             {
-                SetHiddenRecord(c.Handle, c.Record);
-                continue;
+                var (outcome, diag) = TryParkOnce(c);
+                if (RouteParkOutcome(c, outcome, diag, touched, diags))
+                    remaining.Add(c);
             }
-            if (!Native.IsWindow(c.Handle)) continue; // destroyed mid-operation
-            if (MatchesWindowIdentity(c.Handle, c.Record))
-            {
-                RegisterUnmanageable(c.Handle, "park-failed");
-                continue;
-            }
+            pending = remaining;
+        }
+
+        if (pending.Count > 0)
+        {
+            // 事务取消：本轮所有触碰过的窗口按逆序还原，恢复日志写回真实状态；
+            // 桌面索引不提交，操作失败的窗口始终不进入 _unmanageable。
+            bool rolledBack = RollBackParkAttempt(touched);
+            PersistHidden();
+            foreach (var c in pending.Skip(1))
+                AppLog.Warning(nameof(ParkManagedWindows), DescribeParkFailure(c, diags[c.Handle], rolledBack));
+            ParkCandidate first = pending[0];
+            RaiseWindowControlWarning(nameof(ParkManagedWindows),
+                DescribeParkFailure(first, diags[first.Handle], rolledBack), first.Handle);
+            return false;
+        }
+
+        PersistHidden();
+        return true;
+    }
+
+    /// <summary>处置一次非成功的停靠结果；返回 true 表示窗口仍可重试（存活且身份匹配）。</summary>
+    private bool RouteParkOutcome(ParkCandidate c, ParkOutcome outcome, ParkAttemptDiag? diag,
+        List<IntPtr> touched, Dictionary<IntPtr, ParkAttemptDiag> diags)
+    {
+        if (outcome == ParkOutcome.Parked) return false;
+        if (outcome == ParkOutcome.Destroyed || !Native.IsWindow(c.Handle))
+        {
+            RemoveHiddenRecord(c.Handle);
+            touched.Remove(c.Handle);
+            return false;
+        }
+        if (outcome == ParkOutcome.IdentityMismatch || !MatchesWindowIdentity(c.Handle, c.Record))
+        {
+            RemoveHiddenRecord(c.Handle);
+            touched.Remove(c.Handle);
             // The handle was reused while parking: bring the replacement back on screen.
-            if (IsWindowOffScreen(c.Handle))
+            if (IsManagedWindowParked(c.Handle, c.Record))
             {
                 RestoreParkedWindow(c.Handle, c.Record);
                 AppLog.Warning(nameof(ParkManagedWindows),
                     $"HWND={c.Handle} changed identity while parking; restored it to the screen.");
             }
+            return false;
         }
-
-        PersistHidden();
+        diags[c.Handle] = diag!;
         return true;
+    }
+
+    private static string DescribeParkFailure(ParkCandidate c, ParkAttemptDiag d, bool rolledBack)
+    {
+        string api = c.WasIconic ? "SetWindowPlacement" : "SetWindowPos";
+        string mode = c.WasIconic ? "minimized-edge-anchor" : "normal-offscreen";
+        Rectangle? effective = d.IsIconic ? d.NormalRect : d.WindowRect;
+        string visiblePixels = effective.HasValue
+            ? VisibleIntersectionPixels(effective.Value).ToString()
+            : "null";
+        string rollback = rolledBack
+            ? "rollbackSucceeded=True; switch cancelled and all changed windows were restored"
+            : "rollbackIncomplete=True; switch cancelled and recovery records were retained";
+        return $"A managed window could not be parked after {ParkAttemptCount} attempts; {rollback}; " +
+               $"api={api}, apiSucceeded={d.ApiSucceeded}, win32Error={(d.Win32Error?.ToString() ?? "null")}, " +
+               $"visible={d.IsVisible}, iconic={d.IsIconic}, zoomed={d.IsZoomed}, " +
+               $"identityMatches={d.IdentityMatches}, parkMode={mode}, " +
+               $"showCmd={(d.ShowCmd?.ToString() ?? "null")}, visibleIntersectionPixels={visiblePixels}, " +
+               $"windowRect={FormatRect(d.WindowRect)}, normalRect={FormatRect(d.NormalRect)}, " +
+               $"parkTarget=({c.ParkRect.Left},{c.ParkRect.Top},{c.ParkRect.Right},{c.ParkRect.Bottom})";
+    }
+
+    private static string FormatRect(Rectangle? r) =>
+        r.HasValue ? $"({r.Value.Left},{r.Value.Top},{r.Value.Right},{r.Value.Bottom})" : "null";
+
+    private bool RollBackParkAttempt(IEnumerable<IntPtr> handles)
+    {
+        bool success = true;
+        foreach (IntPtr h in handles.Reverse())
+        {
+            if (!Native.IsWindow(h))
+            {
+                RemoveHiddenRecord(h);
+                continue;
+            }
+            success &= UnparkManagedWindow(h);
+        }
+        return success;
     }
 
     /// <summary>把停靠/隐藏窗口恢复（隐藏模式遗留的记录照旧显示）。只处理记录本身。</summary>
@@ -901,7 +1298,7 @@ internal sealed class DesktopManager
             RemoveHiddenRecord(h);
             return false;
         }
-        if (!IsWindowOffScreen(h))
+        if (!IsManagedWindowParked(h, record))
         {
             // 已经回到屏幕内（应用自行移动或还原）：确保可见后清理记录。
             if (!Native.IsWindowVisible(h))
@@ -1126,6 +1523,12 @@ internal sealed class DesktopManager
                         RemoveHiddenRecord(h);
                         return true;
                     }
+                    // Windows hidden by their own application (for example a
+                    // close-to-tray window) have no recovery record. Keeping such
+                    // an HWND in a desktop creates a ghost member: it can make an
+                    // empty desktop grow forever and later block target restore.
+                    if (!Native.IsWindowVisible(h) && !_hidden.ContainsKey(h))
+                        return true;
                     if (Native.IsWindowVisible(h) && !IsEligible(h))
                     {
                         RemoveHiddenRecord(h);
@@ -1151,7 +1554,7 @@ internal sealed class DesktopManager
             // 共享任务栏模式：停靠在屏幕外的窗口保持其桌面归属；
             // 任务栏按钮是跳回它所在桌面的入口。
             if (_hidden.TryGetValue(h, out var parkedRecord) && parkedRecord.Parked &&
-                MatchesWindowIdentity(h, parkedRecord) && IsWindowOffScreen(h))
+                MatchesWindowIdentity(h, parkedRecord) && IsManagedWindowParked(h, parkedRecord))
                 continue;
 
             string? dev = Native.GetMonitorDeviceOfWindow(h);
@@ -1330,6 +1733,9 @@ internal sealed class DesktopManager
         if (!Native.IsWindow(h)) return false;
         if (!_monitors.TryGetValue(dstDevice, out var dst)) return false;
         if (dst.Desktops.Count >= MaxDesktopsPerMonitor) return false;
+        // Integrity-skipped windows remain visible by design. Do not create an
+        // empty desktop and only pretend to move one in the model.
+        if (!CanReassignWindow(h, nameof(CreateDesktopAndMoveWindow))) return false;
         if (!HideOrParkManagedWindows(new[] { h })) return false;
 
         AddDesktop(dst);
@@ -1414,6 +1820,20 @@ internal sealed class DesktopManager
 
     private bool SwitchToCore(MonitorState st, int target)
     {
+        bool ownsGuard = !_switchInProgress;
+        if (ownsGuard) _switchInProgress = true;
+        try
+        {
+            return SwitchToCoreGuarded(st, target);
+        }
+        finally
+        {
+            if (ownsGuard) _switchInProgress = false;
+        }
+    }
+
+    private bool SwitchToCoreGuarded(MonitorState st, int target)
+    {
         if (st.Current == target)
         {
             bool accessible = RestoreManagedWindows(st.Desktops[target]);
@@ -1450,6 +1870,14 @@ internal sealed class DesktopManager
         foreach (var h in targetWindows)
         {
             if (!Native.IsWindow(h)) { st.Desktops[target].Remove(h); continue; }
+            if (!Native.IsWindowVisible(h) && !_hidden.ContainsKey(h))
+            {
+                // The application hid this window itself after the last sync.
+                // It is not ours to show; discard the stale membership and let a
+                // later Sync adopt it wherever it becomes visible again.
+                st.Desktops[target].Remove(h);
+                continue;
+            }
             if (ShowOrUnparkManagedWindow(h))
             {
                 if (targetInitiallyManaged.Contains(h))
@@ -1519,10 +1947,78 @@ internal sealed class DesktopManager
         return true;
     }
 
+    /// <summary>
+    /// Record a user/system minimization of a window on the current desktop. The
+    /// foreground event that immediately follows may merely be Windows selecting
+    /// the next Z-order window, not an intentional taskbar jump.
+    /// </summary>
+    public void HandleMinimizeStarted(IntPtr h)
+    {
+        if (!SharedTaskbar || _switchInProgress || h == IntPtr.Zero) return;
+        long now = Environment.TickCount64;
+        if (_internalMinimizeUntil.TryGetValue(h, out long internalUntil))
+        {
+            if (now <= internalUntil) return;
+            _internalMinimizeUntil.Remove(h);
+        }
+        bool belongsToCurrent = _monitors.Values.Any(st => st.Desktops[st.Current].Contains(h));
+        if (!belongsToCurrent) return;
+        if (_hidden.TryGetValue(h, out var record) && record.Parked) return;
+
+        _minimizeSource = h;
+        _suppressParkedForegroundUntil = now + MinimizeForegroundSuppressMs;
+        _explicitMinimizeRestore = IntPtr.Zero;
+        _explicitMinimizeRestoreUntil = 0;
+        AppLog.Info(nameof(HandleMinimizeStarted),
+            $"Minimize started for current HWND={h}; suppressing one incidental parked foreground activation.");
+    }
+
+    /// <summary>A minimized parked window being restored is an intentional jump signal.</summary>
+    public void HandleMinimizeEnded(IntPtr h)
+    {
+        if (!SharedTaskbar || _switchInProgress || h == IntPtr.Zero) return;
+        if (!_hidden.TryGetValue(h, out var record) || !record.Parked ||
+            !MatchesWindowIdentity(h, record)) return;
+
+        _explicitMinimizeRestore = h;
+        _explicitMinimizeRestoreUntil = Environment.TickCount64 + MinimizeForegroundSuppressMs;
+    }
+
+    private void ExpireMinimizeMarkers(long now)
+    {
+        foreach (IntPtr h in _internalMinimizeUntil
+                     .Where(pair => now > pair.Value)
+                     .Select(pair => pair.Key)
+                     .ToList())
+            _internalMinimizeUntil.Remove(h);
+        if (now > _suppressParkedForegroundUntil)
+        {
+            _minimizeSource = IntPtr.Zero;
+            _suppressParkedForegroundUntil = 0;
+        }
+        if (now > _explicitMinimizeRestoreUntil)
+        {
+            _explicitMinimizeRestore = IntPtr.Zero;
+            _explicitMinimizeRestoreUntil = 0;
+        }
+    }
+
+    private static void FocusShell()
+    {
+        IntPtr tray = Native.FindWindow("Shell_TrayWnd", null);
+        if (tray != IntPtr.Zero)
+            Native.SetForegroundWindow(tray);
+    }
+
+    private void MarkInternalMinimize(IntPtr h) =>
+        _internalMinimizeUntil[h] = Environment.TickCount64 + MinimizeForegroundSuppressMs;
+
     /// <summary>前台窗口变化（任务栏/Alt-Tab 激活了停靠窗口）：跳转到它所在的桌面。</summary>
     public void HandleForegroundActivated(IntPtr h)
     {
         if (!SharedTaskbar || _switchInProgress) return;
+        long now = Environment.TickCount64;
+        ExpireMinimizeMarkers(now);
         if (h == IntPtr.Zero || !_hidden.TryGetValue(h, out var record) || !record.Parked) return;
         if (!MatchesWindowIdentity(h, record))
         {
@@ -1530,6 +2026,25 @@ internal sealed class DesktopManager
                 $"Parked HWND={h} failed the identity check; taskbar jump ignored.");
             return;
         }
+
+        bool explicitRestore =
+            (_explicitMinimizeRestore == h && now <= _explicitMinimizeRestoreUntil) ||
+            (WasSavedMinimized(record) && !Native.IsIconic(h));
+        if (!explicitRestore && _minimizeSource != IntPtr.Zero &&
+            now <= _suppressParkedForegroundUntil)
+        {
+            AppLog.Info(nameof(HandleForegroundActivated),
+                $"Ignored incidental parked foreground HWND={h} after minimizing HWND={_minimizeSource}.");
+            _minimizeSource = IntPtr.Zero;
+            _suppressParkedForegroundUntil = 0;
+            FocusShell();
+            return;
+        }
+
+        _explicitMinimizeRestore = IntPtr.Zero;
+        _explicitMinimizeRestoreUntil = 0;
+        _minimizeSource = IntPtr.Zero;
+        _suppressParkedForegroundUntil = 0;
 
         _switchInProgress = true;
         try
@@ -1691,6 +2206,29 @@ internal sealed class DesktopManager
 
     // ---------- pencere ve masaüstü taşıma ----------
 
+    /// <summary>
+    /// A window that crosses our integrity boundary may follow desktop switches,
+    /// but it cannot be assigned to an inactive desktop because it cannot be hidden
+    /// or parked there. Reject such model mutations before they change any state.
+    /// </summary>
+    private bool CanReassignWindow(IntPtr h, string operation)
+    {
+        if (!Native.IsWindow(h)) return false;
+        if (IsKnownUnmanageable(h))
+        {
+            AppLog.Info(operation,
+                $"Move ignored: HWND={h} is unmanageable and stays on the current desktop.");
+            NotifyKnownUnmanageable(h);
+            return false;
+        }
+        if (!ShouldSkipForIntegrity(h, out string reason)) return true;
+
+        RegisterUnmanageable(h, reason);
+        AppLog.Info(operation,
+            $"Move ignored: HWND={h} crossed the integrity boundary (reason={reason}).");
+        return false;
+    }
+
     /// <summary>Moves the active window to the adjacent desktop on its monitor and follows it.
     /// Moving forward from the last desktop creates a new desktop. An unmanageable window
     /// (e.g. an elevated one) is not moved and no desktop is created; the UI is notified.</summary>
@@ -1700,18 +2238,7 @@ internal sealed class DesktopManager
         if (fg == IntPtr.Zero || !IsEligible(fg)) return;
         // 活动窗口无法控制（如管理员窗口）时，移动没有意义：不新建桌面、
         // 不移动，只发通知（不重复登记日志；气泡由托盘层按会话去重）。
-        if (IsKnownUnmanageable(fg))
-        {
-            AppLog.Info(nameof(MoveActiveWindow),
-                $"Move ignored: HWND={fg} is unmanageable and stays on the current desktop.");
-            NotifyKnownUnmanageable(fg);
-            return;
-        }
-        if (ShouldSkipForIntegrity(fg, out string skipReason))
-        {
-            RegisterUnmanageable(fg, skipReason);
-            return;
-        }
+        if (!CanReassignWindow(fg, nameof(MoveActiveWindow))) return;
         Sync();
         string? dev = Native.GetMonitorDeviceOfWindow(fg);
         if (dev == null || !_monitors.TryGetValue(dev, out var st)) return;
@@ -1751,6 +2278,7 @@ internal sealed class DesktopManager
         if (!Native.IsWindow(h)) return;
         if (!_monitors.TryGetValue(dstDevice, out var dst)) return;
         if (dstLocal < 0 || dstLocal >= dst.Desktops.Count) return;
+        if (!CanReassignWindow(h, nameof(MoveWindowToDesktop))) return;
         if (dst.Current != dstLocal && !HideOrParkManagedWindows(new[] { h })) return;
 
         string? srcDevice = null;
@@ -1804,6 +2332,12 @@ internal sealed class DesktopManager
         dstInsertIndex = Math.Clamp(dstInsertIndex, 0, dst.Desktops.Count);
 
         var set = src.Desktops[srcLocal];
+        // Repositioning a whole desktop across displays is all-or-nothing. A
+        // single integrity-skipped window must reject the operation before the
+        // source/destination lists or any window geometry are changed.
+        foreach (IntPtr h in set.Where(Native.IsWindow))
+            if (!CanReassignWindow(h, nameof(MoveDesktop)))
+                return false;
         if (!HideOrParkManagedWindows(set)) return false;
         var last = src.LastActive[srcLocal];
         bool wasCurrent = src.Current == srcLocal;
@@ -1909,10 +2443,22 @@ internal sealed class DesktopManager
         if (!iconic && Native.GetWindowRect(h, out var wr))
             size = new Size(wr.Right - wr.Left, wr.Bottom - wr.Top);
 
-        Rectangle park = GetParkRect(dstDevice, size);
+        Rectangle park;
         if (iconic)
-            park = new Rectangle(park.X, park.Y, mapped.Width, mapped.Height);
+        {
+            if (!TryGetMinimizedParkRect(dstDevice, mapped.Size, out park))
+            {
+                AppLog.Warning(nameof(RepositionParkedWindow),
+                    $"No safe minimized parking anchor exists for HWND={h} on '{dstDevice}'.");
+                return;
+            }
+        }
+        else
+        {
+            park = GetParkRect(dstDevice, size);
+        }
 
+        bool applied = false;
         if (iconic)
         {
             var pl = new Native.WINDOWPLACEMENT { length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>() };
@@ -1920,23 +2466,35 @@ internal sealed class DesktopManager
             {
                 pl.showCmd = Native.SW_SHOWMINIMIZED;
                 pl.rcNormalPosition = ToRECT(park);
-                Native.SetWindowPlacement(h, ref pl);
+                applied = Native.SetWindowPlacement(h, ref pl);
             }
         }
         else
         {
-            Native.SetWindowPos(h, IntPtr.Zero, park.X, park.Y, 0, 0,
+            applied = Native.SetWindowPos(h, IntPtr.Zero, park.X, park.Y, 0, 0,
                 Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
         }
 
-        SetHiddenRecord(h, rec with
+        var updated = rec with
         {
             NormalLeft = mapped.Left,
             NormalTop = mapped.Top,
             NormalRight = mapped.Right,
             NormalBottom = mapped.Bottom,
+            SavedShowCmd = iconic ? Native.SW_SHOWMINIMIZED : rec.SavedShowCmd,
             ParkMonitor = dstDevice
-        });
+        };
+        bool verified = iconic
+            ? applied && IsManagedWindowParked(h, updated)
+            : applied && IsWindowOffScreen(h);
+        if (!verified)
+        {
+            AppLog.Warning(nameof(RepositionParkedWindow),
+                $"Could not re-park HWND={h} on '{dstDevice}'; recovery record was left unchanged.");
+            return;
+        }
+
+        SetHiddenRecord(h, updated);
     }
 
     private static Rectangle MapWindowRect(Native.RECT rect, Screen srcScreen, Screen dstScreen)

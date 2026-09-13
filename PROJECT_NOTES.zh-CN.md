@@ -4,7 +4,7 @@
 
 本文记录基于 `main` 分支（原始基线提交 `21c9b74`）完成的本地功能修改、代码审查结论、本轮修复状态和验证清单。
 
-## v0.4.7：管理员窗口跳过策略与末尾新建修复（2026-09-13）
+## v0.4.7：管理员窗口跳过策略、停靠退避重试与最小化状态修复（2026-09-13）
 
 - 遇到无法控制的窗口（典型为提权进程窗口，UIPI 使 `ShowWindow`/`SetWindowPos` 对其无效）时不再取消整次桌面切换：该窗口被跳过并保持可见，其余窗口照常隐藏/停靠；仅"恢复快照写入失败"仍中止操作（崩溃恢复的最后安全防线）。自身已提权时不做检测（此时所有窗口可控）。
 - 跳过判定两层：预检测（对方进程 token 完整性级别；探测被拒时保守跳过）＋反应式兜底（隐藏/停靠/身份捕获失败）。跳过集合按句柄记录，用 PID＋类名防句柄复用，自动失效重建；每会话每窗口记一条日志（句柄、标题、类名、进程、原因）。
@@ -14,6 +14,24 @@
 - 文档：帮助窗体触摸板章节（8 语言）与各语言 README 说明——焦点位于管理员窗口时，触摸板"自定义快捷方式"手势（资源管理器合成的按键）会被 Windows UIPI 丢弃，属系统安全边界、应用侧无法修复；此时请用实体键盘快捷键或托盘菜单切换。
 - 诊断日志降噪：移除逐条焦点变化日志；保留快捷键接收、切换链路（请求/提交/边缘）与低频事件日志（身份核验失败、可见窗口迁移、停靠窗口回流收编）。
 - 本地验证：提权 PowerShell 场景——预检测 `reason=elevated` 正确、切换照常提交、气泡仅一次；Debug 构建 0 警告、0 错误。
+
+### 停靠退避重试与最小化状态修复
+
+- 缘起：会话 3 日志显示大量普通窗口（资源管理器、非管理员终端、飞书、Chrome、VS Code、有道、微信等）阵发性停靠失败。本机受控实验（同进程/跨进程/最大化窗口 SetWindowPos 至屏外均可成功且位置稳定）排除系统层问题；失败时刻 API 均返回成功但窗口仍在屏上，系目标窗口侧瞬时否决（拖动中的模态移动循环、应用位置钳制——`SetWindowPos` 对 `WM_WINDOWPOSCHANGING` 被加 `SWP_NOMOVE` 仍返回 TRUE）。
+- 常量修复：`Native.SW_SHOWMINIMIZED` 由 1（`SW_NORMAL`）改为 2。此前最小化窗口在停靠/还原时被恢复为普通窗口，违背"保持最小化"设计。补 `SW_SHOWNORMAL=1`、`SW_RESTORE=9` 常量。
+- `ApplyPark` 重构为 `TryParkOnce`：API 返回后立即保存返回值，失败时立刻读 `Marshal.GetLastWin32Error()`（不先调用其他 API），再采集现场（可见性、最小化/最大化、windowRect、rcNormalPosition、showCmd）并统一走 `IsWindowOffScreen` 校验；只读刷新，不改动首次捕获的恢复几何。
+- 批量退避重试：每轮先尝试**全部**候选，仅失败者进入下一轮，`Thread.Sleep(250ms)` 整组一次退避；共 3 次尝试（t+0/250/500ms），总退避 ≤500ms，失败窗口数不放大延迟；销毁/句柄复用为终态不参与重试；重试成功则正常提交切换；最终失败才逆序回滚本轮全部触碰窗口、写回真实状态、桌面索引不提交、不登记 `_unmanageable`。
+- 日志：中间失败每轮 1 条 INFO（含重试序号）；最终失败仅首个窗口触发托盘气球+WARN（含 api、apiSucceeded、win32Error、rect/parkTarget、showCmd、identityMatches、rollbackSucceeded / rollbackIncomplete=True 标记），其余失败窗口各一条 `AppLog.Warning`；"随后被移回屏幕"仍由 `Sync` 的 "Parked HWND is back on screen" 检测负责。
+- 编译：SDK 8.0.425 下 Debug/Release 均 0 警告、0 错误；`git diff --check` 通过。
+- 待真机验证：拖动窗口中切换、最小化动画中切换（Explorer/终端/飞书/Chrome）、Win+D 后切换、此前失败应用的日志三态区分、最小化窗口停靠后仍为最小化、退出无遗留离屏窗口。
+
+### 修订：25H2 上最小化窗口不再物理停靠（当日 19:20 已装本机验证）
+
+- **OS 行为变化（已用原生 DefWindowProc 窗口对照复现）**：Windows 11 25H2 (build 26200) 上 `SetWindowPlacement` 会执行 `showCmd` 但**忽略 `rcNormalPosition`**（无论目标矩形在屏内还是屏外、无论 flags；`SW_NORMAL` 恢复也回到窗口自身缓存位置）。v0.4.3 起"把最小化窗口的还原位置移出屏幕"的停靠手法在新系统上不可行：初版重试实现中每个被最小化的窗口都会导致切换在 3 次重试后被取消（曾使用户卡在桌面 9）。
+- 对策一：`ParkManagedWindows` 对 `IsIconic` 窗口**直接跳过**——最小化窗口本就不可见，保持最小化即可；用户在任务栏还原后由 `Sync` 不变量收编。副作用：被最小化的窗口不再参与"任务栏点击跳回所在桌面"（其还原位置无法移出屏幕，跳转契约在新系统上无法维持），按不可管理窗口的"跟随当前桌面"语义处理。
+- 对策二：`RestoreIconicPlacement` 新链路（`SW_SHOWNA` 短暂显示→`SetWindowPos` 落位→`SW_MINIMIZE` 收回；Q4 实验证实还原位置随正常矩形自动落位），替换 `RestoreParkedWindow`/`RestoreUnjournaledOffScreenWindow` 中最小化分支的旧 placement 写法；用于 Win+D 把停靠窗口最小化后的还原。`RepositionParkedWindow` 的最小化分支本轮未改（新流程下不再产生 iconic 停靠记录）。
+- `Native.SW_MINIMIZE=6` 常量补齐。
+- 安装验证：0.4.7 修订版安装后，恢复日志正常消费、14/14 热键、切换全部正常提交；仅管理员窗口按设计跟随当前桌面。
 
 ## v0.4.6：诊断日志增强（2026-09-13）
 
