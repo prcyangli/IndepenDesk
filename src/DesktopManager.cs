@@ -385,7 +385,8 @@ internal sealed class DesktopManager
                 AppLog.Warning(nameof(HideManagedWindows),
                     $"Skipped HWND={h} because its identity could not be captured safely.");
                 if (Native.IsWindow(h) && Native.IsWindowVisible(h))
-                    RaiseWindowControlWarning();
+                    RaiseWindowControlWarning(nameof(HideManagedWindows),
+                        "Cannot hide the current desktop safely: the window identity could not be captured", h);
                 identityCaptureFailed = true;
                 continue;
             }
@@ -402,7 +403,8 @@ internal sealed class DesktopManager
             planned[candidate.Record.Handle] = candidate.Record;
         if (!PersistHiddenSnapshot(planned.Values))
         {
-            RaiseWindowControlWarning();
+            RaiseWindowControlWarning(nameof(HideManagedWindows),
+                "Cannot hide the current desktop safely: the recovery snapshot could not be persisted");
             return false;
         }
 
@@ -421,7 +423,9 @@ internal sealed class DesktopManager
                 AppLog.Warning(nameof(HideManagedWindows),
                     $"Could not verify that HWND={candidate.Handle} was hidden.");
                 if (Native.IsWindow(candidate.Handle) && Native.IsWindowVisible(candidate.Handle))
-                    RaiseWindowControlWarning();
+                    RaiseWindowControlWarning(nameof(HideManagedWindows),
+                        "Cannot hide the current desktop safely: the window stayed visible after SW_HIDE",
+                        candidate.Handle);
             }
         }
 
@@ -438,11 +442,40 @@ internal sealed class DesktopManager
         return false;
     }
 
-    private void RaiseWindowControlWarning()
+    private void RaiseWindowControlWarning(string operation, string detail, IntPtr handle = default)
     {
+        AppLog.Warning(operation,
+            handle != IntPtr.Zero ? $"{detail}; window: {DescribeWindow(handle)}" : detail);
         if (_windowControlWarningRaised) return;
         _windowControlWarningRaised = true;
         WindowControlFailed?.Invoke();
+    }
+
+    private static string DescribeWindow(IntPtr h)
+    {
+        try
+        {
+            if (!Native.IsWindow(h)) return $"HWND={h} (window no longer exists)";
+            string title = Native.GetWindowTitle(h);
+            if (title.Length > 60) title = title[..60] + "…";
+            string className = Native.GetWindowClass(h);
+            if (Native.GetWindowThreadProcessId(h, out uint pid) != 0 && pid != 0)
+            {
+                string processName = "unknown";
+                try
+                {
+                    using var process = Process.GetProcessById(checked((int)pid));
+                    processName = process.ProcessName;
+                }
+                catch { }
+                return $"HWND={h}, title='{title}', class='{className}', process='{processName}' (PID {pid})";
+            }
+            return $"HWND={h}, title='{title}', class='{className}'";
+        }
+        catch (Exception ex)
+        {
+            return $"HWND={h} (details unavailable: {ex.Message})";
+        }
     }
 
     private bool ShowManagedWindow(IntPtr h)
@@ -730,7 +763,8 @@ internal sealed class DesktopManager
                 AppLog.Warning(nameof(ParkManagedWindows),
                     $"Skipped HWND={h} because its park placement could not be captured safely.");
                 if (Native.IsWindow(h) && Native.IsWindowVisible(h))
-                    RaiseWindowControlWarning();
+                    RaiseWindowControlWarning(nameof(ParkManagedWindows),
+                        "Cannot park the current desktop safely: the window placement could not be captured", h);
                 captureFailed = true;
                 continue;
             }
@@ -745,7 +779,8 @@ internal sealed class DesktopManager
             planned[c.Record.Handle] = c.Record;
         if (!PersistHiddenSnapshot(planned.Values))
         {
-            RaiseWindowControlWarning();
+            RaiseWindowControlWarning(nameof(ParkManagedWindows),
+                "Cannot park the current desktop safely: the recovery snapshot could not be persisted");
             return false;
         }
 
@@ -763,7 +798,8 @@ internal sealed class DesktopManager
                 AppLog.Warning(nameof(ParkManagedWindows),
                     $"Could not verify that HWND={c.Handle} was parked.");
                 if (Native.IsWindow(c.Handle) && Native.IsWindowVisible(c.Handle))
-                    RaiseWindowControlWarning();
+                    RaiseWindowControlWarning(nameof(ParkManagedWindows),
+                        "Cannot park the current desktop safely: the window stayed on screen", c.Handle);
             }
         }
 
@@ -837,7 +873,7 @@ internal sealed class DesktopManager
             if (!ShowOrUnparkManagedWindow(h))
             {
                 AppLog.Warning(nameof(RestoreManagedWindows),
-                    $"Could not make HWND={h} accessible.");
+                    $"Could not make {DescribeWindow(h)} accessible.");
                 success = false;
             }
         }
@@ -1271,7 +1307,8 @@ internal sealed class DesktopManager
             bool accessible = RestoreManagedWindows(st.Desktops[target]);
             PersistHidden();
             if (!accessible)
-                RaiseWindowControlWarning();
+                RaiseWindowControlWarning(nameof(SwitchToCore),
+                    "Cannot restore the current desktop safely: a managed window is inaccessible");
             DesktopSwitched?.Invoke(BuildInfo(st));
             return accessible;
         }
@@ -1287,6 +1324,7 @@ internal sealed class DesktopManager
         var targetWindows = st.Desktops[target].ToList();
         var targetInitiallyManaged = targetWindows.Where(_hidden.ContainsKey).ToHashSet();
         var targetSuccessfullyRestored = new List<IntPtr>();
+        IntPtr targetRestoreFailure = IntPtr.Zero;
 
         if (!HideOrParkManagedWindows(sourceWindows))
         {
@@ -1311,7 +1349,10 @@ internal sealed class DesktopManager
                 if (targetInitiallyManaged.Contains(h) && !_hidden.ContainsKey(h))
                     st.Desktops[target].Remove(h);
                 else
+                {
                     targetRestored = false;
+                    targetRestoreFailure = h;
+                }
             }
         }
 
@@ -1325,7 +1366,9 @@ internal sealed class DesktopManager
             if (!targetRolledBack || !sourceRolledBack)
                 AppLog.Warning(nameof(SwitchToCore),
                     "Desktop switch rollback was incomplete; recovery records were retained.");
-            RaiseWindowControlWarning();
+            RaiseWindowControlWarning(nameof(SwitchToCore),
+                "Cannot switch desktops safely: the target desktop could not be restored; rolled back",
+                targetRestoreFailure);
             DesktopSwitched?.Invoke(BuildInfo(st));
             return false;
         }
@@ -1423,21 +1466,22 @@ internal sealed class DesktopManager
             var originallyHidden = _hidden.Where(kv => !kv.Value.Parked)
                 .Select(kv => kv.Key).ToList();
             var restored = new List<IntPtr>();
-            bool restoreFailed = false;
+            IntPtr restoreFailure = IntPtr.Zero;
             foreach (IntPtr h in originallyHidden)
             {
                 if (ShowManagedWindow(h))
                     restored.Add(h);
                 else
-                    restoreFailed = true;
+                    restoreFailure = h;
             }
             PersistHidden();
 
-            if (restoreFailed)
+            if (restoreFailure != IntPtr.Zero)
             {
                 HideManagedWindows(restored);
                 PersistHidden();
-                RaiseWindowControlWarning();
+                RaiseWindowControlWarning(nameof(SetSharedTaskbarMode),
+                    "Cannot switch to shared taskbar mode: a managed window could not be shown", restoreFailure);
                 return false;
             }
 
@@ -1462,7 +1506,8 @@ internal sealed class DesktopManager
                         if (i != m.Current)
                             HideManagedWindows(m.Desktops[i]);
                 PersistHidden();
-                RaiseWindowControlWarning();
+                RaiseWindowControlWarning(nameof(SetSharedTaskbarMode),
+                    "Cannot switch to shared taskbar mode: parking other desktops failed; previous mode restored");
                 return false;
             }
 
@@ -1475,20 +1520,21 @@ internal sealed class DesktopManager
             var originallyParked = _hidden.Where(kv => kv.Value.Parked)
                 .Select(kv => kv.Key).ToList();
             var restored = new List<IntPtr>();
-            bool restoreFailed = false;
+            IntPtr restoreFailure = IntPtr.Zero;
             foreach (IntPtr h in originallyParked)
             {
                 if (UnparkManagedWindow(h))
                     restored.Add(h);
                 else
-                    restoreFailed = true;
+                    restoreFailure = h;
             }
 
-            if (restoreFailed)
+            if (restoreFailure != IntPtr.Zero)
             {
                 ParkManagedWindows(restored);
                 PersistHidden();
-                RaiseWindowControlWarning();
+                RaiseWindowControlWarning(nameof(SetSharedTaskbarMode),
+                    "Cannot leave shared taskbar mode: a parked window could not be unparked", restoreFailure);
                 return false;
             }
 
@@ -1507,7 +1553,8 @@ internal sealed class DesktopManager
                         if (i != st.Current && st.Desktops[i].Count > 0)
                             ParkManagedWindows(st.Desktops[i]);
                 PersistHidden();
-                RaiseWindowControlWarning();
+                RaiseWindowControlWarning(nameof(SetSharedTaskbarMode),
+                    "Cannot leave shared taskbar mode: hiding other desktops failed; previous mode restored");
                 return false;
             }
 
