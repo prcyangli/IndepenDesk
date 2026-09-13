@@ -2472,6 +2472,13 @@ internal sealed class DesktopManager
         bool wasVisible = Native.IsWindowVisible(h);
         bool wasMaximized = Native.IsZoomed(h) ||
                             hiddenRecord?.SavedShowCmd == Native.SW_SHOWMAXIMIZED;
+        // A minimized window is its own case: SetWindowPos only moves the
+        // minimized stub (rcNormalPosition stays on the source display), and
+        // since 25H2 SetWindowPlacement ignores rcNormalPosition for minimized
+        // windows entirely (see RestoreIconicPlacement). Neither can move the
+        // restore rectangle across displays; treat iconic first, even when the
+        // placement would restore maximized (WPF_RESTORETOMAXIMIZED is kept).
+        bool wasIconic = Native.IsIconic(h);
 
         var originalPlacement = new Native.WINDOWPLACEMENT
         {
@@ -2497,7 +2504,13 @@ internal sealed class DesktopManager
         int? win32Error = null;
         for (int attempt = 1; attempt <= ParkAttemptCount; attempt++)
         {
-            if (wasMaximized && hasPlacement)
+            if (wasIconic)
+            {
+                // Move the restore rectangle through the verified show -> place ->
+                // re-minimize chain. For a hidden window the fix-up below re-hides it.
+                applied = RestoreIconicPlacement(h, mapped);
+            }
+            else if (wasMaximized && hasPlacement)
             {
                 var targetPlacement = originalPlacement;
                 targetPlacement.rcNormalPosition = ToRECT(mapped);
@@ -2510,7 +2523,7 @@ internal sealed class DesktopManager
                     mapped.X, mapped.Y, mapped.Width, mapped.Height,
                     Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
             }
-            if (!applied)
+            if (!applied && !wasIconic)
                 win32Error = Marshal.GetLastWin32Error();
 
             // SetWindowPlacement also controls the show state. Enforce the original
@@ -2518,9 +2531,14 @@ internal sealed class DesktopManager
             if (!wasVisible && Native.IsWindowVisible(h))
                 Native.ShowWindow(h, Native.SW_HIDE);
 
-            bool assigned = IsWindowPhysicallyAssignedToDisplay(h, dstDevice) ||
-                            (!wasVisible && hiddenRecord != null &&
-                             IsNormalPlacementAssignedToDisplay(h, dstDevice));
+            // For a minimized window the restore rectangle is the authoritative
+            // position (MonitorFromWindow also resolves iconic windows via their
+            // restore position, so it follows once the placement moved).
+            bool assigned = wasIconic
+                ? IsNormalPlacementAssignedToDisplay(h, dstDevice)
+                : IsWindowPhysicallyAssignedToDisplay(h, dstDevice) ||
+                  (!wasVisible && hiddenRecord != null &&
+                   IsNormalPlacementAssignedToDisplay(h, dstDevice));
             if (applied && assigned)
             {
                 if (hiddenRecord != null)
@@ -2547,7 +2565,13 @@ internal sealed class DesktopManager
         }
 
         bool rolledBack;
-        if (wasMaximized && hasPlacement)
+        if (wasIconic && hasPlacement)
+        {
+            // Put the restore rectangle back on the source display with the same
+            // chain; a SetWindowPos rollback is meaningless for a minimized stub.
+            rolledBack = RestoreIconicPlacement(h, FromRECT(originalPlacement.rcNormalPosition));
+        }
+        else if (wasMaximized && hasPlacement)
         {
             var rollbackPlacement = originalPlacement;
             if (!wasVisible)

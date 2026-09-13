@@ -1,8 +1,52 @@
 # IndepenDesk 本地修改与审查记录
 
-更新日期：2026-09-13（v0.4.11）
+更新日期：2026-09-14（v0.4.11）
 
 本文记录基于 `main` 分支（原始基线提交 `21c9b74`）完成的本地功能修改、代码审查结论、本轮修复状态和验证清单。
+
+## v0.4.12：非共享模式最小化窗口跨屏移动修复（2026-09-14）
+
+修复第四轮审查高优先级项（见下节）。
+
+- **根因。** `RepositionWindow` 只区分最大化/普通两态：对最小化窗口 `SetWindowPos` 只移动最小化残影而 `rcNormalPosition` 留在源屏，25H2 上 `SetWindowPlacement` 又忽略最小化窗口的 `rcNormalPosition`（v0.4.7 修订已实测）——两条 API 路径都无法搬走还原位置，只能重试失败回滚（约 600 ms 冻结+气球），或物理核验侥幸通过但还原时弹回源屏被 `Sync` 迁回，移动静默失效。
+- **修复：按当前实际最小化状态优先走已验证的还原链。** `RepositionWindow` 捕获 `wasIconic = IsIconic(h)`；重试循环内最小化窗口改用 `RestoreIconicPlacement(h, mapped)`（`SW_SHOWNOACTIVATE` → `SetWindowPos` 落位映射矩形 → `SW_SHOWMINNOACTIVE` 收回，含内部最小化标记与矩形核验）；隐藏+最小化窗口随后由循环内既有的 `SW_HIDE` 修正恢复隐藏。核验改用 `IsNormalPlacementAssignedToDisplay`——还原矩形是最小化窗口位置的权威依据（`MonitorFromWindow` 对最小化窗口也按还原前矩形判定归属，落位后自然通过，`Sync` 收编语义一致）。图标化失败不设 win32Error（还原链多次 API 调用，错误码无意义）。
+- **回滚对齐。** 重试全部失败时，最小化窗口用同一还原链物化原 `rcNormalPosition` 回源屏，不再走对残影无意义的 `SetWindowPos` 回退。
+- **先最大化后最小化的窗口自然兼容**：其 placement 带 `WPF_RESTORETOMAXIMIZED` 且 `showCmd` 为最小化，`RestoreIconicPlacement` 保留 flags、映射正常矩形，还原后仍在目标显示器最大化。
+- 三个触发入口（`MoveWindowToDesktop`/`CreateDesktopAndMoveWindow`/`MoveDesktop` 跨屏分支）共用本路径，无需改动；`RepositionParkedWindow`（共享模式）原有 iconic 分支不受影响。
+- 验证：SDK 8.0.425 Release 编译 0 警告 0 错误；x64 自包含单文件 publish 成功。**本机真机验证通过**（双屏 1536×960/2560×1440、Windows 11 25H2 build 26200、非共享模式）：隐藏+最小化窗口经总览右键移动到另一显示器非当前桌面，还原矩形落到目标屏坐标、最小化状态保持、无重试风暴与失败气球；任务栏还原后稳定留在目标屏由 `Sync` 收编，不再回弹；14/14 热键注册、热键切换全部提交、会话无 WARN/ERROR。
+
+## 第四轮静态审查（2026-09-14，v0.4.11 源码）
+
+本轮通读全部 14 个源文件（约 5200 行），重点推演非共享（隐藏）模式的切换事务、回滚、恢复链路。**本轮为纯静态审查，未运行应用接管真实桌面；标注"待真机验证"的结论需在隔离 VM 复核。** 写前日志、复合身份核验、原子落盘、回滚闭环、资源释放、单线程模型等均复核无误，以下仅列问题与优化建议。
+
+### 高优先级
+
+- **非共享模式下最小化窗口跨显示器移动必然失败或静默回弹。**（**已于 v0.4.12 修复并真机验证通过**，见上节）`RepositionWindow`（`src/DesktopManager.cs:2459`）只区分最大化/普通两态，无 `IsIconic` 分支：对最小化窗口 `SetWindowPos` 只能移动最小化残影、改不了 `rcNormalPosition`，而 25H2 上 `SetWindowPlacement` 又忽略最小化窗口的 `rcNormalPosition`（v0.4.7 修订已实测）。两条 API 路径都搬不动还原位置 → 双通道核验大概率失败，6×100 ms 重试后回滚并弹失败气球（UI 冻结约 600 ms）；若最小化残影恰好随 SWP 落到目标屏使物理核验侥幸通过，还原位置仍在源屏，任务栏还原后窗口在源显示器弹出并被 `Sync` 收编回源桌面，移动静默失效。触发入口：总览把最小化窗口卡片拖到其他显示器（`MoveWindowToDesktop`/`CreateDesktopAndMoveWindow`）、整桌面跨屏迁移含最小化窗口（`MoveDesktop`）。旁证：`RepositionParkedWindow`（共享模式）有 iconic 分支而隐藏模式没有。建议：iconic 窗口复用 `RestoreIconicPlacement` 的 show→place→re-minimize 链（25H2 已验证），以映射矩形为目标还原位置；或移动前 `SW_RESTORE`→移动→恢复原状态。**待真机验证。**
+
+### 中优先级
+
+- **非共享模式隐藏/恢复路径无"瞬时否决"退避，与同根因已修复的停车路径不对称。** v0.4.7 已实测 `SetWindowPos` 会"返回成功但窗口未动"（拖拽中模态移动循环、应用位置钳制）并给 `ParkManagedWindows` 加了 6×100 ms 批量退避；但 `HideManagedWindows`（`SW_HIDE`+`IsWindowVisible` 核验）、`ShowManagedWindow`/`RestoreParkedWindow`（SWP 落位+物理显示器核验）零重试——同类瞬时否决直接整次切换取消+回滚+气球；`RestoreIconicPlacement` 在 `SW_SHOWMINNOACTIVE` 后立即判 `IsIconic`，最小化属异步动画，是天然误报失败点。且"无法管理"气球每会话只弹一次，首次之后的失败用户完全无感知。建议隐藏/恢复路径对齐停车路径的批量退避。
+- **UI 线程串行退避，最坏数秒级冻结。** `RepositionWindow`（`src/DesktopManager.cs:2540-2546`）每窗口 5×`Thread.Sleep(100)`=500 ms 串行；`MoveDesktop` 整桌面跨屏迁移逐窗口调用，10 个窗口全失败约 5 s 冻结（总览拖拽即在 UI 事件中执行）。共享模式热切换（`SetSharedTaskbarMode`）按"每显示器每非空桌面"串行停车，8 个非空桌面最坏约 4 s+，且在菜单 `CheckedChanged` 中同步执行。`ParkManagedWindows` 已示范正确做法（整组一轮一次退避），建议 `RepositionWindow` 与模式切换改为"先全部尝试、仅失败者整组退避复验"。
+- **托盘「恢复所有窗口」一键摧毁全部桌面布局且无确认。** `RestoreAll`（`src/DesktopManager.cs:2747`）把所有显示器 `Current=0` 并显示全部隐藏窗口后，下一次 `Sync` 按"可见窗口必须属于当前桌面"不变量把各桌面窗口全部迁到 desktop 0、非保留空桌面被剪除——一次误点即抹掉多桌面布局。建议加确认框，或改为仅恢复隐藏窗口可见性、不动桌面模型与 `Current`。
+- **无记录窗口的可达性校验含 off-screen 检查，非对齐多屏"间隙"布局会误取消切换。** `ShowOrUnparkManagedWindow`（`src/DesktopManager.cs:1354-1359`）对无记录分支要求 `!IsWindowOffScreen`；显示器不共边排列时虚拟屏存在间隙，合法落在间隙中的可见窗口会被判不可达，目标桌面含此类窗口时整次切换被误取消+回滚+气球。建议无记录分支只查 `IsWindow && IsWindowVisible`，屏外迁移交给 `Sync`/拔屏路径。
+
+### 低优先级
+
+- **`SlideAnimator` 为死代码**（`TrayApp.EnableAnimations => false`），但若重新启用：`OnTick` 每帧 `Region = new Region(...)` 不释放旧 Region（GDI 句柄泄漏约 65 次/动画），且每次切换抓全屏位图成本高。建议删除或修复后启用。
+- **总览重建逐窗口同步取图标**，`GetWindowSmallIcon` SMTO 超时 120 ms/窗口，多个无响应窗口时打开/刷新总览的冻结按个数累计。低频，可选做后台取图标。
+- **`SetSharedTaskbarMode` 停用路径的回滚重停循环缺 `Count > 0` 过滤**（`src/DesktopManager.cs:2241-2242`，对照 2231-2232 行有过滤）：空桌面白跑一轮 `ParkManagedWindows`（字典分配+JSON 序列化），无害。
+- **`MoveActiveWindow` 创建桌面后 `SwitchToCore` 失败时不回收新桌面**：正常路径不可能失败（只触碰无记录的前台窗口），仅"间隙屏"病态场景会残留一个空桌面，下一次 `Sync` 剪除自愈。可不改。
+
+### 本轮复核确认无问题（不再重复展开）
+
+非共享切换事务（写前日志→逐一隐藏→可见性+身份双校验→失败逆序回滚→目标恢复失败二次回滚）、`PersistHiddenSnapshot` 有序序列化+写透+原子替换+空集删档、崩溃恢复复合身份核验与句柄复用兜底、拔屏迁移三条恢复链、托盘/图标/总览/帮助窗体资源释放、单实例互斥、WinEvent 委托生命周期、全部上下文均在 UI 线程。v0.4.11 三处 `PersistHidden()` 去重的崩溃窗口期已核算：最坏仅为恢复日记暂存旧几何，窗口仍可恢复显示，安全。
+
+### 建议处理顺序
+
+1. ~~修复"最小化窗口跨屏移动"~~（已修复并真机验证通过，v0.4.12）。
+2. 非共享模式隐藏/恢复路径补批量退避。
+3. `RepositionWindow` 与模式热切换改整组退避，消除多窗口最坏冻结。
+4. 评估给「恢复所有窗口」加确认或收窄语义。
 
 ## v0.4.11：跨屏移动隐藏状态日记去重落盘（2026-09-13）
 
