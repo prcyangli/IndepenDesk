@@ -1,8 +1,16 @@
 # IndepenDesk 本地修改与审查记录
 
-更新日期：2026-09-13（v0.4.9）
+更新日期：2026-09-13（v0.4.10）
 
 本文记录基于 `main` 分支（原始基线提交 `21c9b74`）完成的本地功能修改、代码审查结论、本轮修复状态和验证清单。
+
+## v0.4.10：隐藏最大化窗口恢复到错误显示器的修复（2026-09-13）
+
+- **重新显示前强制落位。** `ShowManagedWindow` 原仅在窗口离屏时还原记录位置：隐藏的最大化窗口其活动最大化矩形仍停留在源显示器，会被直接 `SW_SHOWNA` 暴露在旧显示器。现改为凡有保存位置记录，一律先 `RestoreParkedWindow` 物化记录位置再显示。
+- **还原目标显示器与坐标记录同步。** `RestoreParkedWindow` 先按记录中的 `ParkMonitor` 解析目标显示器，新增 `NormalizeWindowRectForScreen` 把与目标不一致的保存矩形按 DPI 映射回目标显示器；`RepositionWindow` 在核验通过后把映射矩形与目标显示器写回隐藏记录并持久化，避免记录与实际位置脱节。
+- **最大化移动以物理核验为准。** 原 `IsWindowAssignedToDisplay` 在物理显示器不符时退而核验 `rcNormalPosition` 所在屏幕，导致"仅更新了 rcNormalPosition 的隐藏最大化窗口"被误判为移动成功；现拆分为 `IsWindowPhysicallyAssignedToDisplay`（`MonitorFromWindow` 物理归属）与 `IsNormalPlacementAssignedToDisplay`，最大化/普通可见窗口只接受物理核验，正常位置核验仅用于隐藏窗口；最大化分支的 `SetWindowPlacement` 失败也按失败处理并进入退避重试/回滚。
+- 隐藏窗口的 `RepositionWindow` 同时把 `SavedShowCmd == SW_SHOWMAXIMIZED` 视为最大化（隐藏状态下 `IsZoomed` 不可靠），源矩形优先取隐藏记录中保存的正常位置。
+- 验证：Release x64 自包含单文件 publish 0 警告 0 错误；优雅退出安装实例后 5 个隐藏窗口全部恢复（日志档按空集删除）；新二进制启动 14/14 热键注册、托盘初始化正常、多次热键切换全部提交、会话无 WARN/ERROR。
 
 ## v0.4.9：跨屏窗口移动事务化（验证 + 退避重试 + 失败回滚）（2026-09-13）
 
