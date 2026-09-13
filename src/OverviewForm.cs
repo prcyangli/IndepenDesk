@@ -727,6 +727,7 @@ internal sealed class OverviewForm : Form
             }));
         };
         foreach (var mon in _mgr.GetLayout())
+        {
             foreach (var desk in mon.Desktops)
             {
                 string label = L.F("ov.menu.move", mon.Ordinal, desk.LocalIndex + 1) +
@@ -738,6 +739,18 @@ internal sealed class OverviewForm : Form
                         _mgr.MoveWindowToDesktop(win.Handle, device, local));
                 });
             }
+            // Mirror of dropping a window onto the "+" card: same manager method,
+            // same "create at the end without switching" behavior; hidden when full.
+            if (mon.Desktops.Count < DesktopManager.MaxDesktopsPerMonitor)
+            {
+                string newDesktopDevice = mon.Device;
+                menu.Items.Add(L.F("ov.menu.moveNew", mon.Ordinal), null, (_, _) =>
+                {
+                    RunAndRefreshOverview(() =>
+                        _mgr.CreateDesktopAndMoveWindow(win.Handle, newDesktopDevice));
+                });
+            }
+        }
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(L.T("ov.menu.goto"), null, (_, _) =>
         {
