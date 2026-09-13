@@ -2080,7 +2080,8 @@ internal sealed class DesktopManager
         }
     }
 
-    /// <summary>切换到指定窗口所在的桌面并把焦点交给它（总览“转到此窗口”与任务栏跳转共用）。</summary>
+    /// <summary>切换到指定窗口所在的桌面并把焦点交给它；窗口处于最小化状态时先取消最小化。
+    /// 总览窗口条目的双击直达使用。</summary>
     public void SwitchToWindow(IntPtr h)
     {
         if (!Native.IsWindow(h)) return;
@@ -2090,9 +2091,27 @@ internal sealed class DesktopManager
                 if (st.Desktops[i].Contains(h))
                 {
                     st.LastActive[i] = h;
-                    SwitchToCore(st, i);
+                    if (SwitchToCore(st, i))
+                        RestoreAndFocusWindow(h);
                     return;
                 }
+    }
+
+    /// <summary>
+    /// 直达窗口链路的收尾：可见的最小化窗口先还原，再兜底前台焦点。只处理
+    /// "取消最小化"，不主动恢复可见性——受管窗口的显示/回屏已由 SwitchToCore
+    /// 完成，应用自行隐藏的窗口不属于本程序恢复范围。提权窗口的还原和聚焦会被
+    /// UIPI 静默拒绝，此时降级为仅切换桌面。
+    /// </summary>
+    private static void RestoreAndFocusWindow(IntPtr h)
+    {
+        if (!Native.IsWindow(h) || !Native.IsWindowVisible(h)) return;
+        if (Native.IsIconic(h))
+            Native.ShowWindow(h, Native.SW_RESTORE);
+        Native.SetForegroundWindow(h);
+        if (Native.GetForegroundWindow() != h)
+            AppLog.Info(nameof(RestoreAndFocusWindow),
+                $"HWND={h} could not take the foreground (possibly elevated); desktop switch only.");
     }
 
     /// <summary>事务化切换共享任务栏模式；窗口状态全部完成后才提交模式。</summary>

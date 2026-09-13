@@ -650,15 +650,40 @@ internal sealed class OverviewForm : Form
         _tips.SetToolTip(titleLbl, win.Title);
 
         void Hover(bool on) => chip.BackColor = on ? ChipHover : ChipBg;
+        // Sürükleme, sistem sürükleme eşiği aşılınca başlar; aksi durumda hızlı
+        // çift tıklama sürüklemeye dönüşür ve DoubleClick olayı asla oluşmaz.
+        Point? chipDragStart = null;
         void OnDown(object? s, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left)
-                StartDrag(chip, new WindowDrag(win.Handle));
+                chipDragStart = e.Location;
+        }
+        void OnMove(object? s, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left || chipDragStart is not Point start) return;
+            var dragBounds = new Rectangle(
+                start.X - SystemInformation.DragSize.Width / 2,
+                start.Y - SystemInformation.DragSize.Height / 2,
+                SystemInformation.DragSize.Width,
+                SystemInformation.DragSize.Height);
+            if (dragBounds.Contains(e.Location)) return;
+            chipDragStart = null;
+            StartDrag(chip, new WindowDrag(win.Handle));
         }
         void OnUp(object? s, MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Right)
+            if (e.Button == MouseButtons.Left)
+                chipDragStart = null;
+            else if (e.Button == MouseButtons.Right)
                 ShowWindowMenu(win, sourceDevice, sourceLocal, chip);
+        }
+        // Çift tık: pencerenin masaüstüne git, simge durumundaysa geri yükle ve odakla.
+        void OnChipDoubleClick(object? s, EventArgs e)
+        {
+            chipDragStart = null;
+            if (!Native.IsWindow(win.Handle)) return;
+            _mgr.SwitchToWindow(win.Handle);
+            Close();
         }
 
         var dragControls = new List<Control> { chip, grip, titleLbl };
@@ -669,7 +694,9 @@ internal sealed class OverviewForm : Form
             c.MouseEnter += (_, _) => Hover(true);
             c.MouseLeave += (_, _) => Hover(false);
             c.MouseDown += OnDown;
+            c.MouseMove += OnMove;
             c.MouseUp += OnUp;
+            c.DoubleClick += OnChipDoubleClick;
         }
         return chip;
     }
@@ -682,8 +709,22 @@ internal sealed class OverviewForm : Form
         _ownedMenus.Add(menu);
         menu.Closed += (_, _) =>
         {
-            _ownedMenus.Remove(menu);
-            menu.Dispose();
+            // Menus auto-dismiss on activation loss while an item's Click handler
+            // is still running (e.g. a window shown by MoveWindowToDesktop steals
+            // the foreground). Disposing here would leave WinForms' HandleItemClick
+            // operating on a disposed menu (ObjectDisposedException). Defer the
+            // disposal until the message loop is idle.
+            if (IsDisposed || !IsHandleCreated)
+            {
+                _ownedMenus.Remove(menu);
+                menu.Dispose();
+                return;
+            }
+            BeginInvoke((Action)(() =>
+            {
+                _ownedMenus.Remove(menu);
+                menu.Dispose();
+            }));
         };
         foreach (var mon in _mgr.GetLayout())
             foreach (var desk in mon.Desktops)
