@@ -66,7 +66,7 @@ internal sealed class TrayApp : ApplicationContext
 
         RegisterHotkeys();
 
-        // 共享任务栏：任务栏/Alt-Tab 激活停靠窗口时跳转到其所在桌面。
+        // Shared taskbar: when the taskbar/Alt-Tab activates a parked window, jump to its desktop.
         var foregroundProc = new Native.WinEventDelegate(OnForegroundEvent);
         _foregroundProc = foregroundProc;
         _foregroundHook = Native.SetWinEventHook(
@@ -222,7 +222,7 @@ internal sealed class TrayApp : ApplicationContext
 
     private static string Truncate(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "…";
 
-    /// <summary>每个会话最多弹出一条“窗口无法管理”气泡；开关关闭时不弹也不占用本次次数。</summary>
+    /// <summary>Show at most one "window cannot be managed" balloon per session; when the setting is off, nothing is shown and the per-session allowance stays unused.</summary>
     private void ShowWindowWarning(string text)
     {
         if (_windowWarningShown) return;

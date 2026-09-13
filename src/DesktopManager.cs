@@ -12,7 +12,7 @@ internal sealed record WindowEntry(IntPtr Handle, string Title);
 internal sealed record DesktopEntry(int LocalIndex, bool IsCurrent, IReadOnlyList<WindowEntry> Windows);
 internal sealed record MonitorEntry(string Device, int Ordinal, IReadOnlyList<DesktopEntry> Desktops);
 
-/// <summary>被跳过的不可管理窗口（句柄、进程名、标题、原因），供通知层显示。</summary>
+/// <summary>A skipped unmanageable window (handle, process name, title, reason), for display by the notification layer.</summary>
 internal sealed record UnmanageableWindowInfo(IntPtr Handle, string ProcessName, string Title, string Reason);
 
 /// <summary>
@@ -49,7 +49,7 @@ internal sealed class DesktopManager
         int SavedShowCmd,
         string? ParkMonitor);
 
-    /// <summary>一个无法安全管理（隐藏/停靠）的窗口；跳过后保持可见并跟随当前桌面。</summary>
+    /// <summary>A window that cannot be managed safely (hidden/parked); once skipped it stays visible and follows the current desktop.</summary>
     private sealed record UnmanageableWindow(uint ProcessId, string ProcessName, string ClassName,
         string Reason, string Title);
 
@@ -66,8 +66,9 @@ internal sealed class DesktopManager
     private const int HiddenStateVersion = 3;
     private const string EmptyPersistedState = "<empty>";
 
-    // 停靠校验失败可能只是窗口侧的瞬时否决（窗口正被拖动、应用做了位置钳制等）：
-    // 失败后整批退避重试，总计最多 3 次尝试，每轮间隔 250 ms，整场切换的额外延迟 ≤500 ms。
+    // A park verification failure may just be a transient refusal by the window (it is being
+    // dragged, the app clamps its position, etc.): on failure the whole batch backs off and
+    // retries, at most 3 attempts with 250 ms between rounds, adding ≤500 ms to a switch.
     private const int ParkAttemptCount = 3;
     private const int ParkRetryDelayMs = 250;
     private const int ParkAnchorThickness = 2;
@@ -94,12 +95,12 @@ internal sealed class DesktopManager
     private long _explicitMinimizeRestoreUntil;
     private readonly Dictionary<IntPtr, long> _internalMinimizeUntil = new();
 
-    /// <summary>自身是否以管理员权限运行；提权后可控制同用户的全部窗口，无需预检测。</summary>
+    /// <summary>Whether we run with administrator rights; once elevated we can control all windows of the same user, so no pre-check is needed.</summary>
     private static readonly bool OwnProcessElevated = Native.IsOwnProcessElevated();
 
     /// <summary>
-    /// 共享任务栏模式：非当前桌面的窗口不隐藏，而是移到屏幕外停靠。
-    /// 它们保留在任务栏/Alt-Tab 中；被激活时自动跳转到所在桌面。
+    /// Shared taskbar mode: windows on non-current desktops are not hidden but parked off-screen.
+    /// They stay in the taskbar/Alt-Tab; activating one jumps to its desktop automatically.
     /// </summary>
     public bool SharedTaskbar { get; private set; }
 
@@ -110,8 +111,8 @@ internal sealed class DesktopManager
     /// <summary>Geçiş tamamlandı (veya uçta OSD tazelemesi).</summary>
     public event Action<SwitchInfo>? DesktopSwitched;
 
-    /// <summary>一个窗口被判定为不可管理（已跳过，保持可见），或一次桌面操作被取消
-    /// （载荷为 null 时表示取消类错误）。</summary>
+    /// <summary>A window was deemed unmanageable (skipped, stays visible), or a desktop operation
+    /// was cancelled (a null payload indicates a cancellation-type error).</summary>
     public event Action<UnmanageableWindowInfo?>? WindowControlFailed;
 
     private static readonly string[] ClassBlacklist =
@@ -524,7 +525,7 @@ internal sealed class DesktopManager
         WindowControlFailed?.Invoke(null);
     }
 
-    /// <summary>该句柄是否已知不可管理；句柄被复用（PID/类名不符）时自动失效并重新检测。</summary>
+    /// <summary>Whether the handle is already known to be unmanageable; if the handle was reused (PID/class name mismatch), the entry is invalidated and the window re-probed.</summary>
     private bool IsKnownUnmanageable(IntPtr h)
     {
         if (!_unmanageable.TryGetValue(h, out var info)) return false;
@@ -538,7 +539,7 @@ internal sealed class DesktopManager
         return true;
     }
 
-    /// <summary>首次登记一个跨完整性边界、确定无法管理的窗口。</summary>
+    /// <summary>First-time registration of a window across the integrity boundary that is definitely unmanageable.</summary>
     private void RegisterUnmanageable(IntPtr h, string reason)
     {
         Native.GetWindowThreadProcessId(h, out uint pid);
@@ -561,8 +562,9 @@ internal sealed class DesktopManager
         WindowControlFailed?.Invoke(new UnmanageableWindowInfo(h, processName, title, reason));
     }
 
-    /// <summary>已知不可管理窗口再次被跳过/操作时：不重复写日志，仅重新发送通知事件
-    /// （托盘层按会话去重；通知曾被关闭时，重新开启后下一次跳过仍可弹出提示）。</summary>
+    /// <summary>A known unmanageable window is skipped/operated on again: do not log again, only re-raise
+    /// the notification event (the tray layer de-duplicates per session; when notifications were disabled,
+    /// re-enabling lets the next skip show the balloon again).</summary>
     private void NotifyKnownUnmanageable(IntPtr h)
     {
         if (_unmanageable.TryGetValue(h, out var info))
@@ -570,8 +572,9 @@ internal sealed class DesktopManager
     }
 
     /// <summary>
-    /// 检测“目标窗口属于提权进程而自身未提权”的情况：UIPI 使这类窗口对
-    /// ShowWindow/SetWindowPos 免疫，直接预先跳过；探测无法判定时保守跳过。
+    /// Detect "target window belongs to an elevated process while we are not elevated": UIPI makes
+    /// such windows immune to ShowWindow/SetWindowPos, so skip them up front; if the probe is
+    /// inconclusive, skip conservatively.
     /// </summary>
     private bool ShouldSkipForIntegrity(IntPtr h, out string reason)
     {
@@ -647,7 +650,7 @@ internal sealed class DesktopManager
         return true;
     }
 
-    // ---------- 共享任务栏模式：离屏停靠 ----------
+    // ---------- Shared taskbar mode: off-screen parking ----------
 
     private static Rectangle FromRECT(Native.RECT r) =>
         Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom);
@@ -671,7 +674,7 @@ internal sealed class DesktopManager
         return false;
     }
 
-    /// <summary>停靠中的窗口（或其最小化还原位置）是否完全在所有显示器之外。</summary>
+    /// <summary>Whether a parked window (or its minimized restore position) lies completely outside all displays.</summary>
     private static bool IsWindowOffScreen(IntPtr h)
     {
         if (Native.IsIconic(h))
@@ -703,8 +706,9 @@ internal sealed class DesktopManager
     }
 
     /// <summary>
-    /// 为指定显示器计算一个不与任何显示器相交的停靠矩形。优先放在目标显示器左侧
-    /// （保持任务栏按钮归属该显示器），然后右侧，最后回退到远端区域。
+    /// Compute a parking rectangle for the given display that intersects no display. Prefer the left
+    /// side of the target display (so the taskbar button stays attributed to that display), then the
+    /// right side, and finally a far-away fallback region.
     /// </summary>
     private static Rectangle GetParkRect(string? device, Size size)
     {
@@ -860,7 +864,7 @@ internal sealed class DesktopManager
 
     private enum ParkOutcome { Parked, Failed, Destroyed, IdentityMismatch }
 
-    /// <summary>一次停靠尝试的诊断现场；不影响业务判定，只用于最终 WARN 与重试 INFO。</summary>
+    /// <summary>Diagnostic snapshot of one parking attempt; it does not affect business decisions and is used only for the final WARN and retry INFO logs.</summary>
     private sealed record ParkAttemptDiag(
         bool ApiSucceeded,
         int? Win32Error,
@@ -912,8 +916,9 @@ internal sealed class DesktopManager
         return true;
     }
 
-    /// <summary>单次停靠尝试：API 返回立即保存结果与错误码，再采集现场并校验是否完全离屏。
-    /// 只刷新当前窗口状态，绝不改动第一次捕获的恢复几何（c.Record 保持不变）。</summary>
+    /// <summary>A single parking attempt: right after the API call, save the result and error code, then collect
+    /// the snapshot and verify the window is fully off-screen. Only the current window state is refreshed; the
+    /// recovery geometry captured first time is never touched (c.Record stays unchanged).</summary>
     private (ParkOutcome Outcome, ParkAttemptDiag? Diag) TryParkOnce(ParkCandidate c)
     {
         if (!Native.IsWindow(c.Handle)) return (ParkOutcome.Destroyed, null);
@@ -936,7 +941,7 @@ internal sealed class DesktopManager
             var pl = new Native.WINDOWPLACEMENT { length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>() };
             if (Native.GetWindowPlacement(c.Handle, ref pl))
             {
-                // 保留原 flags，仅改 showCmd 与还原位置：最小化窗口停靠后仍保持最小化。
+                // Keep the original flags and only change showCmd and the restore position: a minimized window stays minimized after parking.
                 pl.showCmd = Native.SW_SHOWMINIMIZED;
                 pl.rcNormalPosition = ToRECT(c.ParkRect);
                 applied = Native.SetWindowPlacement(c.Handle, ref pl);
@@ -982,7 +987,7 @@ internal sealed class DesktopManager
                 windowRect, normalRect, showCmd));
     }
 
-    /// <summary>把停靠窗口按记录还原到屏幕内；不动 _hidden 和日志（由调用方负责）。</summary>
+    /// <summary>Restore a parked window on-screen according to its record; does not touch _hidden or the logs (the caller handles those).</summary>
     private bool RestoreParkedWindow(IntPtr h, HiddenWindowRecord rec)
     {
         var pl = new Native.WINDOWPLACEMENT { length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>() };
@@ -991,7 +996,7 @@ internal sealed class DesktopManager
         var saved = Rectangle.FromLTRB(rec.NormalLeft, rec.NormalTop, rec.NormalRight, rec.NormalBottom);
         if (!IntersectsAnyScreen(saved))
         {
-            // 显示器被拔掉后保存的矩形可能不在任何屏幕上：就近迁移。
+            // After a display is unplugged the saved rectangle may lie outside every screen: migrate it to the nearest one.
             var host = NearestScreen(saved) ?? Screen.PrimaryScreen;
             if (host == null) return false;
             var wa = host.WorkingArea;
@@ -1003,8 +1008,9 @@ internal sealed class DesktopManager
 
         if (Native.IsIconic(h))
         {
-            // 用户最小化了停靠窗口（如 Win+D）：保持最小化，只把还原位置放回屏幕内。
-            // 25H2 起 SetWindowPlacement 忽略 rcNormalPosition，须走显示→落位→再最小化链路。
+            // The user minimized a parked window (e.g. Win+D): keep it minimized and only move
+            // the restore position back on-screen. Since 25H2 SetWindowPlacement ignores
+            // rcNormalPosition, we must use the show -> place -> re-minimize chain.
             return RestoreIconicPlacement(h, saved);
         }
 
@@ -1058,7 +1064,7 @@ internal sealed class DesktopManager
 
         if (Native.IsIconic(h))
         {
-            // 25H2 起 SetWindowPlacement 忽略 rcNormalPosition，须走显示→落位→再最小化链路。
+            // Since 25H2 SetWindowPlacement ignores rcNormalPosition; use the show -> place -> re-minimize chain.
             return RestoreIconicPlacement(h, saved);
         }
 
@@ -1077,10 +1083,11 @@ internal sealed class DesktopManager
     }
 
     /// <summary>
-    /// 把最小化窗口的还原位置落回屏幕内（保持最小化）。Windows 11 25H2 (build 26200) 起
-    /// SetWindowPlacement 会忽略 rcNormalPosition（原生 DefWindowProc 窗口亦已复现）；
-    /// 可行写法：短暂还原（SW_SHOWNOACTIVATE，不激活、不抢焦点）→ SetWindowPos 落位 → 再次最小化，
-    /// 还原位置会随正常矩形自动落位。
+    /// Move a minimized window's restore position back on-screen (keeping it minimized). Since
+    /// Windows 11 25H2 (build 26200) SetWindowPlacement ignores rcNormalPosition (reproduced even
+    /// on a plain DefWindowProc window); what works: briefly restore (SW_SHOWNOACTIVATE: no
+    /// activation, no focus steal) -> place it with SetWindowPos -> minimize again, and the
+    /// restore position then follows the normal rectangle.
     /// </summary>
     private bool RestoreIconicPlacement(IntPtr h, Rectangle saved)
     {
@@ -1097,7 +1104,7 @@ internal sealed class DesktopManager
             Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
         if (!moved || IsWindowOffScreen(h))
         {
-            // 落位失败时收回为最小化，避免把窗口留在屏外的可见状态。
+            // If placement failed, pull it back to minimized so the window is not left visible off-screen.
             MarkInternalMinimize(h);
             Native.ShowWindow(h, Native.SW_SHOWMINNOACTIVE);
             return false;
@@ -1134,7 +1141,7 @@ internal sealed class DesktopManager
         foreach (IntPtr h in handles.Distinct())
         {
             if (!Native.IsWindow(h) || !Native.IsWindowVisible(h)) continue;
-            // 已经停靠的窗口保持原样（保留其原始屏幕位置记录）。
+            // An already parked window is left as-is (keeping its original on-screen position record).
             if (_hidden.TryGetValue(h, out var existing) && existing.Parked &&
                 MatchesWindowIdentity(h, existing) && IsManagedWindowParked(h, existing))
                 continue;
@@ -1186,7 +1193,7 @@ internal sealed class DesktopManager
                 pending.Add(c);
         }
 
-        // 批量退避重试：每轮全组只等一次 250 ms，失败窗口数量不放大总延迟。
+        // Batched backoff retry: the whole group waits only once per round (250 ms), so the number of failed windows does not amplify the total delay.
         for (int attempt = 2; pending.Count > 0 && attempt <= ParkAttemptCount; attempt++)
         {
             AppLog.Info(nameof(ParkManagedWindows),
@@ -1206,8 +1213,9 @@ internal sealed class DesktopManager
 
         if (pending.Count > 0)
         {
-            // 事务取消：本轮所有触碰过的窗口按逆序还原，恢复日志写回真实状态；
-            // 桌面索引不提交，操作失败的窗口始终不进入 _unmanageable。
+            // Transaction cancellation: restore every window touched this round in reverse order
+            // and write the recovery journal back to the true state; the desktop index is not
+            // committed, and a window that failed the operation never enters _unmanageable.
             bool rolledBack = RollBackParkAttempt(touched);
             PersistHidden();
             foreach (var c in pending.Skip(1))
@@ -1222,7 +1230,7 @@ internal sealed class DesktopManager
         return true;
     }
 
-    /// <summary>处置一次非成功的停靠结果；返回 true 表示窗口仍可重试（存活且身份匹配）。</summary>
+    /// <summary>Handle a non-success parking outcome; returns true when the window can still be retried (alive, with matching identity).</summary>
     private bool RouteParkOutcome(ParkCandidate c, ParkOutcome outcome, ParkAttemptDiag? diag,
         List<IntPtr> touched, Dictionary<IntPtr, ParkAttemptDiag> diags)
     {
@@ -1288,7 +1296,7 @@ internal sealed class DesktopManager
         return success;
     }
 
-    /// <summary>把停靠/隐藏窗口恢复（隐藏模式遗留的记录照旧显示）。只处理记录本身。</summary>
+    /// <summary>Restore a parked/hidden window (records left over from hidden mode are simply shown). Only handles the record itself.</summary>
     private bool UnparkManagedWindow(IntPtr h)
     {
         if (!_hidden.TryGetValue(h, out var record)) return false;
@@ -1300,7 +1308,7 @@ internal sealed class DesktopManager
         }
         if (!IsManagedWindowParked(h, record))
         {
-            // 已经回到屏幕内（应用自行移动或还原）：确保可见后清理记录。
+            // Already back on-screen (the app moved or restored it itself): ensure visibility, then clean up the record.
             if (!Native.IsWindowVisible(h))
             {
                 Native.ShowWindow(h, Native.SW_SHOWNA);
@@ -1551,8 +1559,8 @@ internal sealed class DesktopManager
         {
             if (!IsEligible(h)) continue;
 
-            // 共享任务栏模式：停靠在屏幕外的窗口保持其桌面归属；
-            // 任务栏按钮是跳回它所在桌面的入口。
+            // Shared taskbar mode: a window parked off-screen keeps its desktop membership;
+            // its taskbar button is the entry point for jumping back to that desktop.
             if (_hidden.TryGetValue(h, out var parkedRecord) && parkedRecord.Parked &&
                 MatchesWindowIdentity(h, parkedRecord) && IsManagedWindowParked(h, parkedRecord))
                 continue;
@@ -1650,9 +1658,11 @@ internal sealed class DesktopManager
         bool createdDesktop = false;
         if (target >= st.Desktops.Count)
         {
-            // 不可管理窗口（如管理员窗口）始终跟随当前桌面，不能作为"桌面非空"
-            // 的依据；仅剩这类窗口时视同空桌面，避免在末尾无限新建。未缓存的
-            // 窗口现场探测完整性（纯查询，不登记——登记只发生在真正的隐藏/停靠时）。
+            // An unmanageable window (e.g. an elevated one) always follows the current desktop and
+            // cannot count as proof that "the desktop is non-empty"; when only such windows remain,
+            // treat the desktop as empty to avoid creating desktops endlessly at the end. Uncached
+            // windows get a live integrity probe (query only, no registration — registration happens
+            // only when a window is actually hidden/parked).
             bool hasEffectiveWindows = st.Desktops[st.Current]
                 .Any(h => Native.IsWindow(h) && !IsKnownUnmanageable(h) && !ShouldSkipForIntegrity(h, out _));
             bool canGrow = delta > 0
@@ -1929,7 +1939,7 @@ internal sealed class DesktopManager
         if (focus != IntPtr.Zero)
             Native.SetForegroundWindow(focus);
 
-        // 共享模式下绝不让前台停留在屏幕外的窗口上（SetForegroundWindow 失败时的兜底）。
+        // In shared mode never leave the foreground on an off-screen window (fallback for when SetForegroundWindow fails).
         if (SharedTaskbar)
         {
             IntPtr now = Native.GetForegroundWindow();
@@ -2013,7 +2023,7 @@ internal sealed class DesktopManager
     private void MarkInternalMinimize(IntPtr h) =>
         _internalMinimizeUntil[h] = Environment.TickCount64 + MinimizeForegroundSuppressMs;
 
-    /// <summary>前台窗口变化（任务栏/Alt-Tab 激活了停靠窗口）：跳转到它所在的桌面。</summary>
+    /// <summary>Foreground window changed (the taskbar/Alt-Tab activated a parked window): jump to the desktop it belongs to.</summary>
     public void HandleForegroundActivated(IntPtr h)
     {
         if (!SharedTaskbar || _switchInProgress) return;
@@ -2061,7 +2071,7 @@ internal sealed class DesktopManager
                         return;
                     }
 
-            // 记录存在但已不属于任何桌面（崩溃恢复遗留等）：并入其显示器的当前桌面并显示。
+            // A record exists but the window belongs to no desktop (e.g. a crash-recovery leftover): adopt it into the current desktop of its display and show it.
             string? dev = record.ParkMonitor != null && _monitors.ContainsKey(record.ParkMonitor)
                 ? record.ParkMonitor
                 : Native.GetMonitorDeviceUnderCursor();
@@ -2080,8 +2090,8 @@ internal sealed class DesktopManager
         }
     }
 
-    /// <summary>切换到指定窗口所在的桌面并把焦点交给它；窗口处于最小化状态时先取消最小化。
-    /// 总览窗口条目的双击直达使用。</summary>
+    /// <summary>Switch to the desktop containing the given window and hand it the focus; unminimize
+    /// first when the window is minimized. Used by the double-click direct jump of window entries.</summary>
     public void SwitchToWindow(IntPtr h)
     {
         if (!Native.IsWindow(h)) return;
@@ -2098,10 +2108,11 @@ internal sealed class DesktopManager
     }
 
     /// <summary>
-    /// 直达窗口链路的收尾：可见的最小化窗口先还原，再兜底前台焦点。只处理
-    /// "取消最小化"，不主动恢复可见性——受管窗口的显示/回屏已由 SwitchToCore
-    /// 完成，应用自行隐藏的窗口不属于本程序恢复范围。提权窗口的还原和聚焦会被
-    /// UIPI 静默拒绝，此时降级为仅切换桌面。
+    /// Final step of the direct-jump path: restore a visible but minimized window, then try to
+    /// give it the foreground as a fallback. Only "unminimize" is handled here; visibility is never
+    /// restored proactively — SwitchToCore already showed/brought back the managed windows, and
+    /// windows hidden by their own apps are out of our recovery scope. Restoring and focusing an
+    /// elevated window is silently denied by UIPI; in that case degrade to switching only the desktop.
     /// </summary>
     private static void RestoreAndFocusWindow(IntPtr h)
     {
@@ -2114,7 +2125,7 @@ internal sealed class DesktopManager
                 $"HWND={h} could not take the foreground (possibly elevated); desktop switch only.");
     }
 
-    /// <summary>事务化切换共享任务栏模式；窗口状态全部完成后才提交模式。</summary>
+    /// <summary>Switch shared taskbar mode transactionally; commit the mode only after every window state has been updated.</summary>
     public bool SetSharedTaskbarMode(bool enable)
     {
         if (enable == SharedTaskbar) return true;
@@ -2255,8 +2266,9 @@ internal sealed class DesktopManager
     {
         IntPtr fg = Native.GetForegroundWindow();
         if (fg == IntPtr.Zero || !IsEligible(fg)) return;
-        // 活动窗口无法控制（如管理员窗口）时，移动没有意义：不新建桌面、
-        // 不移动，只发通知（不重复登记日志；气泡由托盘层按会话去重）。
+        // When the active window cannot be controlled (e.g. an elevated window), moving is
+        // meaningless: do not create a desktop and do not move — only notify (no repeated log
+        // entries; the balloon is de-duplicated per session by the tray layer).
         if (!CanReassignWindow(fg, nameof(MoveActiveWindow))) return;
         Sync();
         string? dev = Native.GetMonitorDeviceOfWindow(fg);
@@ -2389,7 +2401,7 @@ internal sealed class DesktopManager
     }
 
     /// <summary>Pencereyi kaynak monitördeki göreli konumunu koruyarak hedef monitöre taşır.
-    /// 停靠中的窗口：按 DPI 映射保存的矩形并转移到目标显示器的停靠区。</summary>
+    /// For a parked window: map the saved rectangle by DPI and transfer it to the target display's parking area.</summary>
     private void RepositionWindow(IntPtr h, string srcDevice, string dstDevice)
     {
         if (_hidden.TryGetValue(h, out var rec) && rec.Parked)
@@ -2447,7 +2459,7 @@ internal sealed class DesktopManager
             AppLog.Warning(nameof(RepositionWindow), $"SetWindowPos failed for HWND={h}.");
     }
 
-    /// <summary>跨显示器移动停靠窗口：按 DPI 映射其保存的屏幕内矩形，并把窗口转移到目标显示器的停靠区。</summary>
+    /// <summary>Move a parked window across displays: map its saved on-screen rectangle by DPI and transfer the window to the target display's parking area.</summary>
     private void RepositionParkedWindow(IntPtr h, HiddenWindowRecord rec, string srcDevice, string dstDevice)
     {
         var srcScreen = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == srcDevice);
