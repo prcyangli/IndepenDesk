@@ -7,11 +7,17 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        AppLog.Info(nameof(Main),
+            $"IndepenDesk v{UpdateChecker.CurrentVersion} starting " +
+            $"({(Environment.Is64BitProcess ? "x64" : "x86")}; {Environment.OSVersion.VersionString}; " +
+            $"packaged={StartupManager.IsPackaged}; \"{Environment.ProcessPath ?? "?"}\").");
+
         ApplicationConfiguration.Initialize();
 
         using var mutex = CreateSingleInstanceMutex(out bool isNew);
         if (!isNew)
         {
+            AppLog.Warning(nameof(Main), "Another instance is already running; exiting after the notice.");
             MessageBox.Show(L.T("msg.alreadyRunning"), "IndepenDesk",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;

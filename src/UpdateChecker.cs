@@ -47,6 +47,8 @@ internal static class UpdateChecker
 
             if (latestVer > currentVer)
             {
+                AppLog.Info(nameof(CheckAndNotifyAsync),
+                    $"Update available: v{latest} (installed: v{CurrentVersion}).");
                 var answer = MessageBox.Show(owner,
                     L.F("update.available", latest, CurrentVersion),
                     L.T("update.title"), MessageBoxButtons.YesNo, MessageBoxIcon.Information);
@@ -55,6 +57,8 @@ internal static class UpdateChecker
             }
             else
             {
+                AppLog.Info(nameof(CheckAndNotifyAsync),
+                    $"No update available; v{CurrentVersion} is the latest release.");
                 MessageBox.Show(owner, L.F("update.none", CurrentVersion),
                     L.T("update.title"), MessageBoxButtons.OK, MessageBoxIcon.Information);
             }

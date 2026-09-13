@@ -28,7 +28,9 @@ internal sealed class TrayApp : ApplicationContext
     {
         _hotkeys = new HotkeyWindow(OnHotkey);
 #if !DEBUG
-        StartupManager.ApplyOnLaunch();
+        if (!StartupManager.ApplyOnLaunch())
+            AppLog.Warning(nameof(TrayApp),
+                "The startup preference could not be applied or verified in the registry Run key.");
 #endif
 
         _trayIcon = CreateIcon();
@@ -53,7 +55,11 @@ internal sealed class TrayApp : ApplicationContext
             _osd.ShowSwitch(info);
         };
         _manager.WindowControlFailed += () =>
+        {
+            AppLog.Warning(nameof(DesktopManager.WindowControlFailed),
+                $"Showing warning balloon: {L.T("msg.windowControlFail")}");
             _tray.ShowBalloonTip(5000, "IndepenDesk", L.T("msg.windowControlFail"), ToolTipIcon.Warning);
+        };
 
         RegisterHotkeys();
 
@@ -69,6 +75,11 @@ internal sealed class TrayApp : ApplicationContext
                 "SetWinEventHook(EVENT_SYSTEM_FOREGROUND) failed; taskbar jump is unavailable.");
 
         _manager.Sync();
+        string autostart = StartupManager.IsPackaged
+            ? "managed by Windows Settings"
+            : (StartupManager.IsRegistered() ? "registered" : "not registered");
+        AppLog.Info(nameof(TrayApp),
+            $"Tray initialized; autostart: {autostart}; shared taskbar: {_manager.SharedTaskbar}.");
 #if DEBUG
         // Debug builds are used for local UI verification, so show the overview immediately.
         OverviewForm.Toggle(_manager);
@@ -113,6 +124,9 @@ internal sealed class TrayApp : ApplicationContext
             sharedRestoring = true;
             sharedItem.Checked = _manager.SharedTaskbar;
             sharedRestoring = false;
+            AppLog.Warning(nameof(BuildMenu),
+                $"Shared taskbar mode change failed (requested={requestedMode}, " +
+                $"kept={_manager.SharedTaskbar}). Showing balloon: {L.T("msg.sharedTaskbarFail")}");
             _tray.ShowBalloonTip(4000, "IndepenDesk", L.T("msg.sharedTaskbarFail"), ToolTipIcon.Warning);
         };
         menu.Items.Add(sharedItem);
@@ -148,9 +162,14 @@ internal sealed class TrayApp : ApplicationContext
             startupItem.CheckedChanged += (_, _) =>
             {
                 if (restoringState || StartupManager.SetEnabled(startupItem.Checked)) return;
+                bool requested = startupItem.Checked;
                 restoringState = true;
                 startupItem.Checked = StartupManager.IsRegistered();
                 restoringState = false;
+                AppLog.Warning(nameof(BuildMenu),
+                    $"Startup setting change failed (requested={(requested ? "enabled" : "disabled")}, " +
+                    $"actual={(StartupManager.IsRegistered() ? "enabled" : "disabled")}). " +
+                    $"Showing balloon: {L.T("msg.startupFail")}");
                 _tray.ShowBalloonTip(4000, "IndepenDesk", L.T("msg.startupFail"), ToolTipIcon.Warning);
             };
         }
@@ -228,8 +247,10 @@ internal sealed class TrayApp : ApplicationContext
     private void RegisterHotkeys()
     {
         var failed = new List<string>();
+        int attempted = 0;
         void Reg(int id, uint mods, uint vk, string label)
         {
+            attempted++;
             if (!Native.RegisterHotKey(_hotkeys.Handle, id, mods | Native.MOD_NOREPEAT, vk))
                 failed.Add(label);
         }
@@ -244,8 +265,18 @@ internal sealed class TrayApp : ApplicationContext
             Reg(HkDesktopBase + i, ca, (uint)('1' + i), $"Ctrl+Alt+{i + 1}");
 
         if (failed.Count > 0)
+        {
+            AppLog.Warning(nameof(RegisterHotkeys),
+                $"Registered {attempted - failed.Count}/{attempted} global hotkeys; " +
+                $"already in use by another app: {string.Join(", ", failed)}. " +
+                $"Showing balloon: {L.T("msg.hotkeyFail")}{string.Join(", ", failed)}");
             _tray?.ShowBalloonTip(4000, "IndepenDesk",
                 L.T("msg.hotkeyFail") + string.Join(", ", failed), ToolTipIcon.Warning);
+        }
+        else
+        {
+            AppLog.Info(nameof(RegisterHotkeys), $"Registered all {attempted} global hotkeys.");
+        }
     }
 
     private static Icon CreateIcon()

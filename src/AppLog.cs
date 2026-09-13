@@ -17,6 +17,9 @@ internal static class AppLog
     public static void Warning(string operation, string message) =>
         Write("WARN", operation, message);
 
+    public static void Info(string operation, string message) =>
+        Write("INFO", operation, message);
+
     private static void Write(string level, string operation, string message)
     {
         try
