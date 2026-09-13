@@ -68,9 +68,9 @@ internal sealed class DesktopManager
 
     // A park verification failure may just be a transient refusal by the window (it is being
     // dragged, the app clamps its position, etc.): on failure the whole batch backs off and
-    // retries, at most 3 attempts with 250 ms between rounds, adding ≤500 ms to a switch.
-    private const int ParkAttemptCount = 3;
-    private const int ParkRetryDelayMs = 250;
+    // retries, at most 6 attempts with 100 ms between rounds, adding ≤500 ms to a switch.
+    private const int ParkAttemptCount = 6;
+    private const int ParkRetryDelayMs = 100;
     private const int ParkAnchorThickness = 2;
     private const int ParkRectTolerance = 2;
     private const int MinimizeForegroundSuppressMs = 750;
@@ -1746,20 +1746,26 @@ internal sealed class DesktopManager
         // Integrity-skipped windows remain visible by design. Do not create an
         // empty desktop and only pretend to move one in the model.
         if (!CanReassignWindow(h, nameof(CreateDesktopAndMoveWindow))) return false;
+        string? srcDevice = FindWindowDevice(h);
+        bool wasAccessible = Native.IsWindowVisible(h) && !IsWindowOffScreen(h);
         if (!HideOrParkManagedWindows(new[] { h })) return false;
+
+        if (srcDevice != null && srcDevice != dstDevice &&
+            !RepositionWindow(h, srcDevice, dstDevice))
+        {
+            if (wasAccessible)
+                ShowOrUnparkManagedWindow(h);
+            PersistHidden();
+            return false;
+        }
 
         AddDesktop(dst);
         int target = dst.Desktops.Count - 1;
         _retainedEmptyDesktops.Add(dst.Desktops[target]);
 
-        string? srcDevice = null;
         foreach (var st in _monitors.Values)
             foreach (var set in st.Desktops)
-                if (set.Remove(h))
-                    srcDevice = st.Device;
-
-        if (srcDevice != null && srcDevice != dstDevice)
-            RepositionWindow(h, srcDevice, dstDevice);
+                set.Remove(h);
 
         AddWindow(dst.Desktops[target], h);
         dst.LastActive[target] = h;
@@ -2310,16 +2316,25 @@ internal sealed class DesktopManager
         if (!_monitors.TryGetValue(dstDevice, out var dst)) return;
         if (dstLocal < 0 || dstLocal >= dst.Desktops.Count) return;
         if (!CanReassignWindow(h, nameof(MoveWindowToDesktop))) return;
+        string? srcDevice = FindWindowDevice(h);
+        bool wasAccessible = Native.IsWindowVisible(h) && !IsWindowOffScreen(h);
         if (dst.Current != dstLocal && !HideOrParkManagedWindows(new[] { h })) return;
 
-        string? srcDevice = null;
+        if (srcDevice != null && srcDevice != dstDevice &&
+            !RepositionWindow(h, srcDevice, dstDevice))
+        {
+            // Hiding/parking happens before cross-display repositioning. If the
+            // source desktop was visible, undo that presentation change as well;
+            // desktop membership has deliberately not been touched yet.
+            if (wasAccessible)
+                ShowOrUnparkManagedWindow(h);
+            PersistHidden();
+            return;
+        }
+
         foreach (var st in _monitors.Values)
             foreach (var set in st.Desktops)
-                if (set.Remove(h))
-                    srcDevice = st.Device;
-
-        if (srcDevice != null && srcDevice != dstDevice)
-            RepositionWindow(h, srcDevice, dstDevice);
+                set.Remove(h);
 
         AddWindow(dst.Desktops[dstLocal], h);
         dst.LastActive[dstLocal] = h;
@@ -2331,6 +2346,15 @@ internal sealed class DesktopManager
 
         foreach (var st in _monitors.Values) PruneTrailingEmpty(st);
         PersistHidden();
+    }
+
+    private string? FindWindowDevice(IntPtr h)
+    {
+        foreach (var st in _monitors.Values)
+            foreach (var set in st.Desktops)
+                if (set.Contains(h))
+                    return st.Device;
+        return null;
     }
 
     /// <summary>Bir masaüstünü aynı veya başka monitörde belirtilen ekleme konumuna taşır.</summary>
@@ -2369,10 +2393,34 @@ internal sealed class DesktopManager
         foreach (IntPtr h in set.Where(Native.IsWindow))
             if (!CanReassignWindow(h, nameof(MoveDesktop)))
                 return false;
+        bool wasCurrent = src.Current == srcLocal;
         if (!HideOrParkManagedWindows(set)) return false;
         var last = src.LastActive[srcLocal];
-        bool wasCurrent = src.Current == srcLocal;
         var dstCurrent = dst.Desktops[dst.Current];
+
+        // Do not mutate either desktop list until every physical window move has
+        // been verified. If one move fails, return already moved windows to the
+        // source display and restore visibility when the source desktop was active.
+        var repositioned = new List<IntPtr>();
+        foreach (var h in set.ToList())
+        {
+            if (!Native.IsWindow(h)) { set.Remove(h); continue; }
+            if (RepositionWindow(h, srcDevice, dstDevice))
+            {
+                repositioned.Add(h);
+                continue;
+            }
+
+            bool geometryRolledBack = true;
+            foreach (IntPtr moved in repositioned.AsEnumerable().Reverse())
+                geometryRolledBack &= RepositionWindow(moved, dstDevice, srcDevice);
+            bool presentationRolledBack = !wasCurrent || RestoreManagedWindows(set);
+            PersistHidden();
+            if (!geometryRolledBack || !presentationRolledBack)
+                AppLog.Warning(nameof(MoveDesktop),
+                    "Cross-display desktop move was cancelled, but rollback was incomplete.");
+            return false;
+        }
 
         src.Desktops.RemoveAt(srcLocal);
         src.LastActive.RemoveAt(srcLocal);
@@ -2380,12 +2428,6 @@ internal sealed class DesktopManager
         if (src.Current > srcLocal) src.Current--;
         if (src.Current >= src.Desktops.Count) src.Current = src.Desktops.Count - 1;
 
-        // Taşınan pencereleri hedef monitöre konumlandır ve gizle (eklenen masaüstü aktif değil)
-        foreach (var h in set.ToList())
-        {
-            if (!Native.IsWindow(h)) { set.Remove(h); continue; }
-            RepositionWindow(h, srcDevice, dstDevice);
-        }
         dst.Desktops.Insert(dstInsertIndex, set);
         dst.LastActive.Insert(dstInsertIndex, last);
         dst.Current = dst.Desktops.IndexOf(dstCurrent);
@@ -2402,69 +2444,124 @@ internal sealed class DesktopManager
 
     /// <summary>Pencereyi kaynak monitördeki göreli konumunu koruyarak hedef monitöre taşır.
     /// For a parked window: map the saved rectangle by DPI and transfer it to the target display's parking area.</summary>
-    private void RepositionWindow(IntPtr h, string srcDevice, string dstDevice)
+    private bool RepositionWindow(IntPtr h, string srcDevice, string dstDevice)
     {
         if (_hidden.TryGetValue(h, out var rec) && rec.Parked)
-        {
-            RepositionParkedWindow(h, rec, srcDevice, dstDevice);
-            return;
-        }
+            return RepositionParkedWindow(h, rec, srcDevice, dstDevice);
 
         var srcScreen = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == srcDevice);
         var dstScreen = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == dstDevice);
-        if (srcScreen == null || dstScreen == null) return;
+        if (srcScreen == null || dstScreen == null) return false;
         bool wasVisible = Native.IsWindowVisible(h);
         bool wasMaximized = Native.IsZoomed(h);
+
+        var originalPlacement = new Native.WINDOWPLACEMENT
+        {
+            length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>()
+        };
+        bool hasPlacement = Native.GetWindowPlacement(h, ref originalPlacement);
+        bool hasWindowRect = Native.GetWindowRect(h, out Native.RECT originalWindowRect);
+
+        Native.RECT sourceRect;
+        if (hasPlacement)
+            sourceRect = originalPlacement.rcNormalPosition;
+        else if (hasWindowRect)
+            sourceRect = originalWindowRect;
+        else
+            return false;
+
+        Rectangle mapped = MapWindowRect(sourceRect, srcScreen, dstScreen);
+        bool applied = false;
+        int? win32Error = null;
+        for (int attempt = 1; attempt <= ParkAttemptCount; attempt++)
+        {
+            if (wasMaximized && hasPlacement)
+            {
+                var targetPlacement = originalPlacement;
+                targetPlacement.rcNormalPosition = ToRECT(mapped);
+                targetPlacement.showCmd = (uint)(wasVisible ? Native.SW_MAXIMIZE : Native.SW_HIDE);
+                applied = Native.SetWindowPlacement(h, ref targetPlacement);
+            }
+            else
+            {
+                applied = Native.SetWindowPos(h, IntPtr.Zero,
+                    mapped.X, mapped.Y, mapped.Width, mapped.Height,
+                    Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+            }
+            if (!applied)
+                win32Error = Marshal.GetLastWin32Error();
+
+            // SetWindowPlacement also controls the show state. Enforce the original
+            // hidden state in case a third-party window changes it while moving.
+            if (!wasVisible && Native.IsWindowVisible(h))
+                Native.ShowWindow(h, Native.SW_HIDE);
+
+            if (applied && IsWindowAssignedToDisplay(h, dstDevice))
+                return true;
+
+            if (attempt < ParkAttemptCount)
+            {
+                AppLog.Info(nameof(RepositionWindow),
+                    $"Cross-display positioning verification failed for HWND={h}; " +
+                    $"retry {attempt + 1}/{ParkAttemptCount} scheduled in {ParkRetryDelayMs} ms.");
+                Thread.Sleep(ParkRetryDelayMs);
+            }
+        }
+
+        bool rolledBack;
+        if (wasMaximized && hasPlacement)
+        {
+            var rollbackPlacement = originalPlacement;
+            if (!wasVisible)
+                rollbackPlacement.showCmd = Native.SW_HIDE;
+            rolledBack = Native.SetWindowPlacement(h, ref rollbackPlacement);
+        }
+        else if (hasWindowRect)
+        {
+            rolledBack = Native.SetWindowPos(h, IntPtr.Zero,
+                originalWindowRect.Left, originalWindowRect.Top,
+                Math.Max(1, originalWindowRect.Right - originalWindowRect.Left),
+                Math.Max(1, originalWindowRect.Bottom - originalWindowRect.Top),
+                Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+        }
+        else
+        {
+            rolledBack = false;
+        }
+
+        if (!wasVisible && Native.IsWindowVisible(h))
+            Native.ShowWindow(h, Native.SW_HIDE);
+        else if (wasVisible && !Native.IsWindowVisible(h))
+            Native.ShowWindow(h, Native.SW_SHOWNA);
+
+        RaiseWindowControlWarning(nameof(RepositionWindow),
+            $"Could not reposition HWND={h} from '{srcDevice}' to '{dstDevice}' after " +
+            $"{ParkAttemptCount} attempts; apiSucceeded={applied}, " +
+            $"win32Error={(win32Error?.ToString() ?? "null")}, rollbackSucceeded={rolledBack}", h);
+        return false;
+    }
+
+    private static bool IsWindowAssignedToDisplay(IntPtr h, string device)
+    {
+        if (Native.GetMonitorDeviceOfWindow(h) == device) return true;
 
         var placement = new Native.WINDOWPLACEMENT
         {
             length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>()
         };
-        bool hasPlacement = Native.GetWindowPlacement(h, ref placement);
-
-        Native.RECT sourceRect;
-        if (hasPlacement)
-            sourceRect = placement.rcNormalPosition;
-        else if (!Native.GetWindowRect(h, out sourceRect))
-            return;
-
-        Rectangle mapped = MapWindowRect(sourceRect, srcScreen, dstScreen);
-
-        if (wasMaximized && hasPlacement)
-        {
-            placement.rcNormalPosition = new Native.RECT
-            {
-                Left = mapped.Left,
-                Top = mapped.Top,
-                Right = mapped.Right,
-                Bottom = mapped.Bottom
-            };
-            placement.showCmd = (uint)(wasVisible ? Native.SW_MAXIMIZE : Native.SW_HIDE);
-            if (!Native.SetWindowPlacement(h, ref placement))
-                AppLog.Warning(nameof(RepositionWindow), $"SetWindowPlacement failed for HWND={h}.");
-
-            // SetWindowPlacement also controls the show state. Enforce the original
-            // hidden state in case a third-party window changes it while moving.
-            if (!wasVisible && Native.IsWindowVisible(h))
-            {
-                Native.ShowWindow(h, Native.SW_HIDE);
-                AppLog.Warning(nameof(RepositionWindow),
-                    $"HWND={h} became visible while updating its hidden placement.");
-            }
-            return;
-        }
-
-        if (!Native.SetWindowPos(h, IntPtr.Zero, mapped.X, mapped.Y, mapped.Width, mapped.Height,
-                Native.SWP_NOZORDER | Native.SWP_NOACTIVATE))
-            AppLog.Warning(nameof(RepositionWindow), $"SetWindowPos failed for HWND={h}.");
+        if (!Native.GetWindowPlacement(h, ref placement)) return false;
+        Rectangle normal = FromRECT(placement.rcNormalPosition);
+        return normal.Width > 0 && normal.Height > 0 &&
+               Screen.FromRectangle(normal).DeviceName == device;
     }
 
     /// <summary>Move a parked window across displays: map its saved on-screen rectangle by DPI and transfer the window to the target display's parking area.</summary>
-    private void RepositionParkedWindow(IntPtr h, HiddenWindowRecord rec, string srcDevice, string dstDevice)
+    private bool RepositionParkedWindow(IntPtr h, HiddenWindowRecord rec, string srcDevice, string dstDevice)
     {
         var srcScreen = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == srcDevice);
         var dstScreen = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == dstDevice);
-        if (srcScreen == null || dstScreen == null) return;
+        if (srcScreen == null || dstScreen == null) return false;
+        if (!Native.IsWindow(h) || !MatchesWindowIdentity(h, rec)) return false;
 
         var saved = Rectangle.FromLTRB(rec.NormalLeft, rec.NormalTop, rec.NormalRight, rec.NormalBottom);
         Rectangle mapped = MapWindowRect(ToRECT(saved), srcScreen, dstScreen);
@@ -2481,29 +2578,12 @@ internal sealed class DesktopManager
             {
                 AppLog.Warning(nameof(RepositionParkedWindow),
                     $"No safe minimized parking anchor exists for HWND={h} on '{dstDevice}'.");
-                return;
+                return false;
             }
         }
         else
         {
             park = GetParkRect(dstDevice, size);
-        }
-
-        bool applied = false;
-        if (iconic)
-        {
-            var pl = new Native.WINDOWPLACEMENT { length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>() };
-            if (Native.GetWindowPlacement(h, ref pl))
-            {
-                pl.showCmd = Native.SW_SHOWMINIMIZED;
-                pl.rcNormalPosition = ToRECT(park);
-                applied = Native.SetWindowPlacement(h, ref pl);
-            }
-        }
-        else
-        {
-            applied = Native.SetWindowPos(h, IntPtr.Zero, park.X, park.Y, 0, 0,
-                Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
         }
 
         var updated = rec with
@@ -2515,17 +2595,67 @@ internal sealed class DesktopManager
             SavedShowCmd = iconic ? Native.SW_SHOWMINIMIZED : rec.SavedShowCmd,
             ParkMonitor = dstDevice
         };
-        bool verified = iconic
-            ? applied && IsManagedWindowParked(h, updated)
-            : applied && IsWindowOffScreen(h);
-        if (!verified)
+        var target = new ParkCandidate(h, updated, park, iconic);
+        bool moved = TryParkCandidateWithRetry(target, nameof(RepositionParkedWindow),
+            out ParkOutcome outcome, out ParkAttemptDiag? diag);
+        if (moved)
         {
-            AppLog.Warning(nameof(RepositionParkedWindow),
-                $"Could not re-park HWND={h} on '{dstDevice}'; recovery record was left unchanged.");
-            return;
+            SetHiddenRecord(h, updated);
+            PersistHidden();
+            return true;
         }
 
-        SetHiddenRecord(h, updated);
+        // A failed target move can leave the HWND on-screen even when the Win32
+        // call returned success. Put it back in a valid source parking area before
+        // returning; the original recovery record remains authoritative throughout.
+        bool rolledBack = outcome is ParkOutcome.Destroyed or ParkOutcome.IdentityMismatch;
+        if (outcome == ParkOutcome.Failed && Native.IsWindow(h) && MatchesWindowIdentity(h, rec))
+        {
+            Rectangle sourcePark;
+            if (iconic)
+            {
+                rolledBack = TryGetMinimizedParkRect(srcDevice, saved.Size, out sourcePark) &&
+                    TryParkCandidateWithRetry(new ParkCandidate(h, rec, sourcePark, true),
+                        nameof(RepositionParkedWindow), out _, out _);
+            }
+            else
+            {
+                sourcePark = GetParkRect(srcDevice, size);
+                rolledBack = TryParkCandidateWithRetry(new ParkCandidate(h, rec, sourcePark, false),
+                    nameof(RepositionParkedWindow), out _, out _);
+            }
+        }
+
+        if (outcome is ParkOutcome.Destroyed or ParkOutcome.IdentityMismatch)
+            RemoveHiddenRecord(h);
+        PersistHidden();
+
+        string diagnostic = diag == null
+            ? $"outcome={outcome}"
+            : $"outcome={outcome}, apiSucceeded={diag.ApiSucceeded}, " +
+              $"win32Error={(diag.Win32Error?.ToString() ?? "null")}, " +
+              $"windowRect={FormatRect(diag.WindowRect)}, normalRect={FormatRect(diag.NormalRect)}";
+        RaiseWindowControlWarning(nameof(RepositionParkedWindow),
+            $"Could not re-park HWND={h} on '{dstDevice}'; " +
+            $"rollbackSucceeded={rolledBack}; {diagnostic}", h);
+        return false;
+    }
+
+    private bool TryParkCandidateWithRetry(ParkCandidate candidate, string operation,
+        out ParkOutcome outcome, out ParkAttemptDiag? diag)
+    {
+        (outcome, diag) = TryParkOnce(candidate);
+        for (int attempt = 2;
+             outcome == ParkOutcome.Failed && attempt <= ParkAttemptCount;
+             attempt++)
+        {
+            AppLog.Info(operation,
+                $"Parking verification failed for HWND={candidate.Handle}; " +
+                $"retry {attempt}/{ParkAttemptCount} scheduled in {ParkRetryDelayMs} ms.");
+            Thread.Sleep(ParkRetryDelayMs);
+            (outcome, diag) = TryParkOnce(candidate);
+        }
+        return outcome == ParkOutcome.Parked;
     }
 
     private static Rectangle MapWindowRect(Native.RECT rect, Screen srcScreen, Screen dstScreen)
