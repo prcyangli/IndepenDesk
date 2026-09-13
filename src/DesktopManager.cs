@@ -2533,7 +2533,6 @@ internal sealed class DesktopManager
                         NormalBottom = mapped.Bottom,
                         ParkMonitor = dstDevice
                     });
-                    PersistHidden();
                 }
                 return true;
             }
@@ -2641,7 +2640,6 @@ internal sealed class DesktopManager
         if (moved)
         {
             SetHiddenRecord(h, updated);
-            PersistHidden();
             return true;
         }
 
@@ -2668,7 +2666,6 @@ internal sealed class DesktopManager
 
         if (outcome is ParkOutcome.Destroyed or ParkOutcome.IdentityMismatch)
             RemoveHiddenRecord(h);
-        PersistHidden();
 
         string diagnostic = diag == null
             ? $"outcome={outcome}"
