@@ -124,7 +124,15 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
 
         menu.Items.Add(L.T("menu.overview"), null, (_, _) => OverviewForm.Toggle(_manager));
-        menu.Items.Add(L.T("menu.restore"), null, (_, _) => _manager.RestoreAll());
+        menu.Items.Add(L.T("menu.restore"), null, (_, _) =>
+        {
+            // RestoreAll merges every desktop into the first one on each monitor:
+            // a single accidental click would otherwise destroy the whole layout.
+            if (MessageBox.Show(new WindowWrapper(_hotkeys.Handle), L.T("msg.restoreConfirm"),
+                    "IndepenDesk", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                    MessageBoxDefaultButton.Button2) == DialogResult.Yes)
+                _manager.RestoreAll();
+        });
 
         // Hidden while shared taskbar mode is on: that mode already jumps to a parked window's desktop.
         var jumpItem = new ToolStripMenuItem(L.T("menu.taskbarJump"))
