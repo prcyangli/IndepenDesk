@@ -1029,9 +1029,17 @@ internal sealed class DesktopManager
 
         if (Native.IsIconic(h))
         {
-            // The user minimized a parked window (e.g. Win+D): keep it minimized and only move
-            // the restore position back on-screen. Since 25H2 SetWindowPlacement ignores
-            // rcNormalPosition, we must use the show -> place -> re-minimize chain.
+            // Fast path: the restore rectangle already matches the record — the
+            // common case when nothing moved the window while it was hidden. The
+            // caller's SW_SHOWNA reveals it minimized without any show -> place ->
+            // re-minimize cycle (which would flash and animate every window).
+            if (TryGetEffectiveWindowRect(h, out Rectangle current) &&
+                RectApproximatelyEquals(current, saved))
+                return true;
+            // The user minimized a parked window (e.g. Win+D): keep it minimized and
+            // only move the restore position back on-screen. Since 25H2
+            // SetWindowPlacement ignores rcNormalPosition, we must use the
+            // show -> place -> re-minimize chain.
             return RestoreIconicPlacement(h, saved) &&
                    IsNormalPlacementAssignedToDisplay(h, target.DeviceName);
         }
