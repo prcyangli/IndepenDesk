@@ -18,9 +18,13 @@ internal sealed class TrayApp : ApplicationContext
     private readonly SlideAnimator _animator = new();
     private readonly HotkeyWindow _hotkeys;
     private readonly System.Windows.Forms.Timer _syncTimer = new() { Interval = 1000 };
+    // A journaled window was shown by its app (usually without activation): reconcile
+    // shortly. The delay leaves a taskbar jump (foreground event) a chance to fire first.
+    private readonly System.Windows.Forms.Timer _shownReconcileTimer = new() { Interval = 400 };
     private Native.WinEventDelegate? _foregroundProc;
     private IntPtr _foregroundHook;
     private IntPtr _minimizeHook;
+    private IntPtr _showHook;
     private bool _exiting;
     private bool _resourcesDisposed;
     private bool _windowWarningShown;
@@ -85,6 +89,14 @@ internal sealed class TrayApp : ApplicationContext
             AppLog.Warning(nameof(TrayApp),
                 "SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART/END) failed; minimize focus suppression is unavailable.");
 
+        _showHook = Native.SetWinEventHook(
+            Native.EVENT_OBJECT_SHOW, Native.EVENT_OBJECT_SHOW,
+            IntPtr.Zero, foregroundProc, 0, 0,
+            Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
+        if (_showHook == IntPtr.Zero)
+            AppLog.Warning(nameof(TrayApp),
+                "SetWinEventHook(EVENT_OBJECT_SHOW) failed; shown-window reconciliation waits for the periodic sync.");
+
         _manager.Sync();
         string autostart = StartupManager.IsPackaged
             ? "managed by Windows Settings"
@@ -97,6 +109,7 @@ internal sealed class TrayApp : ApplicationContext
 #endif
         _syncTimer.Tick += (_, _) => OnSyncTick();
         _syncTimer.Start();
+        _shownReconcileTimer.Tick += (_, _) => OnShownReconcileTick();
     }
 
     /// <summary>Menüyü (yeniden) kurar; dil değişince tekrar çağrılır.</summary>
@@ -272,9 +285,10 @@ internal sealed class TrayApp : ApplicationContext
             }
 
             _idleSyncPasses++;
+            // Cap the idle interval at 5 s: app-initiated window shows must not linger
+            // unreconciled for 15 s (the window would float on the current desktop).
             _syncTimer.Interval = _idleSyncPasses switch
             {
-                >= 12 => 15000,
                 >= 4 => 5000,
                 _ => 2000
             };
@@ -284,6 +298,20 @@ internal sealed class TrayApp : ApplicationContext
             AppLog.Error(nameof(OnSyncTick), ex);
             _idleSyncPasses = 0;
             _syncTimer.Interval = 5000;
+        }
+    }
+
+    private void OnShownReconcileTick()
+    {
+        _shownReconcileTimer.Stop();
+        if (OverviewForm.IsOpen) return;
+        try
+        {
+            _manager.Sync();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error(nameof(OnShownReconcileTick), ex);
         }
     }
 
@@ -301,6 +329,13 @@ internal sealed class TrayApp : ApplicationContext
                 break;
             case Native.EVENT_SYSTEM_MINIMIZEEND:
                 _manager.HandleMinimizeEnded(hwnd);
+                break;
+            case Native.EVENT_OBJECT_SHOW:
+                // A journaled window was shown by its application (typically without
+                // activation): arm the deferred reconcile; do not restart it while
+                // armed so a stream of shows cannot starve the tick forever.
+                if (_manager.NeedsShownReconcile(hwnd) && !_shownReconcileTimer.Enabled)
+                    _shownReconcileTimer.Start();
                 break;
         }
     }
@@ -419,6 +454,7 @@ internal sealed class TrayApp : ApplicationContext
         if (_resourcesDisposed) return;
         _resourcesDisposed = true;
         _syncTimer.Stop();
+        _shownReconcileTimer.Stop();
         for (int id = 1; id < HkDesktopBase + 9; id++)
             Native.UnregisterHotKey(_hotkeys.Handle, id);
         if (_foregroundHook != IntPtr.Zero)
@@ -431,6 +467,11 @@ internal sealed class TrayApp : ApplicationContext
             Native.UnhookWinEvent(_minimizeHook);
             _minimizeHook = IntPtr.Zero;
         }
+        if (_showHook != IntPtr.Zero)
+        {
+            Native.UnhookWinEvent(_showHook);
+            _showHook = IntPtr.Zero;
+        }
         _foregroundProc = null;
         _animator.Dispose();
         var menu = _tray.ContextMenuStrip;
@@ -441,6 +482,7 @@ internal sealed class TrayApp : ApplicationContext
         _trayIcon.Dispose();
         _osd.Dispose();
         _syncTimer.Dispose();
+        _shownReconcileTimer.Dispose();
         _hotkeys.Dispose();
     }
 

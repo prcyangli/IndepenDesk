@@ -2319,6 +2319,16 @@ internal sealed class DesktopManager
         AppLog.Info(nameof(SetTaskbarJump), $"Taskbar jump {(enable ? "enabled" : "disabled")}.");
     }
 
+    /// <summary>
+    /// Whether a window that just became visible is one we keep hidden/parked on another
+    /// desktop. Used to schedule an immediate reconciliation (adoption or taskbar jump)
+    /// instead of waiting for the periodic sync, which may be backed off by up to 15 s
+    /// while idle.
+    /// </summary>
+    public bool NeedsShownReconcile(IntPtr h) =>
+        !_switchInProgress && h != IntPtr.Zero &&
+        _hidden.ContainsKey(h) && Native.IsWindowVisible(h);
+
     /// <summary>Switch shared taskbar mode transactionally; commit the mode only after every window state has been updated.</summary>
     public bool SetSharedTaskbarMode(bool enable)
     {
