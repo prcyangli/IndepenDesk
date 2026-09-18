@@ -32,6 +32,7 @@ internal static class Program
             AppLog.Error("UI thread", e.Exception);
             app?.ExitThread();
         };
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => AppLog.Shutdown();
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
             if (e.ExceptionObject is Exception exception)
@@ -53,6 +54,8 @@ internal static class Program
         finally
         {
             app?.Dispose();
+            // Drain the background log writer so diagnostics survive the exit.
+            AppLog.Shutdown();
         }
     }
 
