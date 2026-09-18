@@ -51,6 +51,8 @@ internal static class Native
     public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
 
     public const uint WM_GETICON = 0x007F;
+    public const uint WM_NULL = 0x0000;
+    public const uint SMTO_ABORTIFHUNG = 0x0002;
     public const int GCLP_HICONSM = -34;
 
     public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
@@ -137,7 +139,7 @@ internal static class Native
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam,
         uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
 

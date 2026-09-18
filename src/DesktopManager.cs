@@ -504,16 +504,34 @@ internal sealed class DesktopManager
     }
 
     /// <summary>One hide attempt: SW_HIDE followed by the visibility + identity verification.</summary>
+    /// <summary>Window liveness probe budget; healthy windows answer in well under a millisecond.</summary>
+    private const uint HangProbeTimeoutMs = 50;
+
+    /// <summary>
+    /// Cheap liveness probe. IsHungAppWindow only reports windows the system has already
+    /// flagged (some earlier message to them timed out); a suspended process with an
+    /// empty queue stays unflagged until the first blocked call. A WM_NULL round-trip
+    /// with SMTO_ABORTIFHUNG fails within the budget for both flagged-hung and merely
+    /// suspended windows, so callers can refuse them before any blocking call.
+    /// </summary>
+    internal static bool WindowResponds(IntPtr h)
+    {
+        Native.SendMessageTimeout(h, Native.WM_NULL, IntPtr.Zero, IntPtr.Zero,
+            Native.SMTO_ABORTIFHUNG, HangProbeTimeoutMs, out _);
+        return Marshal.GetLastWin32Error() == 0;
+    }
+
     /// <summary>
     /// Whether it is safe to send a window synchronous messages right now. ShowWindow,
     /// SetWindowPos and SetForegroundWindow deliver their effects through the target
-    /// window's thread; calling one on a hung window blocks this UI thread indefinitely
-    /// and freezes all desktop management until that app recovers (observed in the wild
-    /// with an unresponsive WinUI Notepad). A hung window is treated as a transient
-    /// refusal so the batched retries and rollback paths resolve it in bounded time.
+    /// window's thread; calling one on a hung or suspended window blocks this UI thread
+    /// indefinitely and freezes all desktop management until that app recovers (observed
+    /// in the wild with an unresponsive WinUI Notepad). An unresponsive window is treated
+    /// as a transient refusal so the batched retries and rollback paths resolve it in
+    /// bounded time.
     /// </summary>
     private static bool SafeToModifyWindow(IntPtr h) =>
-        Native.IsWindow(h) && !Native.IsHungAppWindow(h);
+        Native.IsWindow(h) && !Native.IsHungAppWindow(h) && WindowResponds(h);
 
     private bool TryHideOnce((IntPtr Handle, HiddenWindowRecord Record) candidate)
     {
@@ -985,10 +1003,10 @@ internal sealed class DesktopManager
     {
         if (!Native.IsWindow(c.Handle)) return (ParkOutcome.Destroyed, null);
         if (!MatchesWindowIdentity(c.Handle, c.Record)) return (ParkOutcome.IdentityMismatch, null);
-        // Never send window messages to a hung app: the call would block the UI thread
-        // until it recovers. Report it as a failed attempt with a full diagnostic so
-        // the retry rounds and the rollback log have something to describe.
-        if (Native.IsHungAppWindow(c.Handle))
+        // Never send window messages to an unresponsive app: the call would block the UI
+        // thread until it recovers. Report it as a failed attempt with a full diagnostic
+        // so the retry rounds and the rollback log have something to describe.
+        if (!SafeToModifyWindow(c.Handle))
             return (ParkOutcome.Failed,
                 new ParkAttemptDiag(false, null, true, Native.IsWindowVisible(c.Handle),
                     Native.IsIconic(c.Handle), Native.IsZoomed(c.Handle), null, null, null));
@@ -2099,7 +2117,7 @@ internal sealed class DesktopManager
             !st.Desktops[target].Contains(focus))
             focus = st.Desktops[target].FirstOrDefault(h =>
                 Native.IsWindow(h) && Native.IsWindowVisible(h) && !Native.IsIconic(h));
-        if (focus != IntPtr.Zero && !Native.IsHungAppWindow(focus))
+        if (focus != IntPtr.Zero && WindowResponds(focus))
             Native.SetForegroundWindow(focus);
 
         // In shared mode never leave the foreground on an off-screen window (fallback for when SetForegroundWindow fails).
@@ -2378,7 +2396,7 @@ internal sealed class DesktopManager
     /// </summary>
     private static void RestoreAndFocusWindow(IntPtr h)
     {
-        if (!Native.IsWindow(h) || !Native.IsWindowVisible(h) || Native.IsHungAppWindow(h)) return;
+        if (!Native.IsWindow(h) || !Native.IsWindowVisible(h) || !WindowResponds(h)) return;
         if (Native.IsIconic(h))
             Native.ShowWindow(h, Native.SW_RESTORE);
         Native.SetForegroundWindow(h);
