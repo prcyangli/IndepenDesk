@@ -453,6 +453,7 @@ internal sealed class DesktopManager
             .Where(c => _hidden.ContainsKey(c.Handle))
             .ToDictionary(c => c.Handle, c => _hidden[c.Handle]);
         var touched = new List<IntPtr>();
+        var pending = new List<(IntPtr Handle, HiddenWindowRecord Record)>();
         foreach (var candidate in candidates)
         {
             // The durable snapshot already contains this record. Add it to the
@@ -460,39 +461,75 @@ internal sealed class DesktopManager
             // even when verification itself fails.
             SetHiddenRecord(candidate.Handle, candidate.Record);
             touched.Add(candidate.Handle);
-            Native.ShowWindow(candidate.Handle, Native.SW_HIDE);
-            if (!Native.IsWindowVisible(candidate.Handle) &&
-                MatchesWindowIdentity(candidate.Handle, candidate.Record))
+            if (TryHideOnce(candidate) || RouteHideOutcome(candidate, touched))
                 continue;
+            pending.Add(candidate);
+        }
 
-            if (!Native.IsWindow(candidate.Handle))
+        // Batched backoff retry (mirrors ParkManagedWindows): a transient refusal
+        // (the window is being dragged, the app clamps its position) must not cancel
+        // the switch on the first try; the whole group waits only once per round.
+        for (int attempt = 2; pending.Count > 0 && attempt <= ParkAttemptCount; attempt++)
+        {
+            AppLog.Info(nameof(HideManagedWindows),
+                $"Hide verification failed for {pending.Count} window(s) " +
+                $"({string.Join(", ", pending.Select(c => c.Handle))}); " +
+                $"retry {attempt}/{ParkAttemptCount} scheduled in {ParkRetryDelayMs} ms.");
+            Thread.Sleep(ParkRetryDelayMs);
+            var remaining = new List<(IntPtr Handle, HiddenWindowRecord Record)>();
+            foreach (var candidate in pending)
             {
-                RemoveHiddenRecord(candidate.Handle);
-                touched.RemoveAt(touched.Count - 1);
-                continue;
+                if (TryHideOnce(candidate) || RouteHideOutcome(candidate, touched))
+                    continue;
+                remaining.Add(candidate);
             }
-            if (!MatchesWindowIdentity(candidate.Handle, candidate.Record))
-            {
-                RemoveHiddenRecord(candidate.Handle);
-                touched.RemoveAt(touched.Count - 1);
-                // Hidden but the handle was reused: bring the replacement back on screen.
-                if (!Native.IsWindowVisible(candidate.Handle))
-                    Native.ShowWindow(candidate.Handle, Native.SW_SHOWNA);
-                continue;
-            }
+            pending = remaining;
+        }
 
+        if (pending.Count > 0)
+        {
             bool rolledBack = RollBackHiddenAttempt(touched, previousRecords);
             PersistHidden();
             RaiseWindowControlWarning(nameof(HideManagedWindows),
                 rolledBack
                     ? "A normal window could not be hidden; switch cancelled and all changed windows were restored"
                     : "A normal window could not be hidden; switch cancelled but rollback was incomplete (recovery records retained)",
-                candidate.Handle);
+                pending[0].Handle);
             return false;
         }
 
         PersistHidden();
         return true;
+    }
+
+    /// <summary>One hide attempt: SW_HIDE followed by the visibility + identity verification.</summary>
+    private bool TryHideOnce((IntPtr Handle, HiddenWindowRecord Record) candidate)
+    {
+        Native.ShowWindow(candidate.Handle, Native.SW_HIDE);
+        return !Native.IsWindowVisible(candidate.Handle) &&
+               MatchesWindowIdentity(candidate.Handle, candidate.Record);
+    }
+
+    /// <summary>Handle a terminal hide outcome (window destroyed or handle reused);
+    /// returns true when the candidate needs no further retries.</summary>
+    private bool RouteHideOutcome((IntPtr Handle, HiddenWindowRecord Record) candidate, List<IntPtr> touched)
+    {
+        if (!Native.IsWindow(candidate.Handle))
+        {
+            RemoveHiddenRecord(candidate.Handle);
+            touched.Remove(candidate.Handle);
+            return true;
+        }
+        if (!MatchesWindowIdentity(candidate.Handle, candidate.Record))
+        {
+            RemoveHiddenRecord(candidate.Handle);
+            touched.Remove(candidate.Handle);
+            // Hidden but the handle was reused: bring the replacement back on screen.
+            if (!Native.IsWindowVisible(candidate.Handle))
+                Native.ShowWindow(candidate.Handle, Native.SW_SHOWNA);
+            return true;
+        }
+        return false; // transient refusal — retriable
     }
 
     private bool RollBackHiddenAttempt(IEnumerable<IntPtr> handles,
@@ -1911,6 +1948,7 @@ internal sealed class DesktopManager
         }
 
         bool targetRestored = true;
+        var restorePending = new List<IntPtr>();
         foreach (var h in targetWindows)
         {
             if (!Native.IsWindow(h)) { st.Desktops[target].Remove(h); continue; }
@@ -1922,24 +1960,48 @@ internal sealed class DesktopManager
                 st.Desktops[target].Remove(h);
                 continue;
             }
-            if (ShowOrUnparkManagedWindow(h))
+            switch (TryRestoreTargetWindow(h, targetInitiallyManaged, targetSuccessfullyRestored))
             {
-                if (targetInitiallyManaged.Contains(h))
-                    targetSuccessfullyRestored.Add(h);
-            }
-            else
-            {
-                // An identity mismatch removes its recovery record: the HWND was
-                // reused and no longer represents the managed window. Prune that
-                // stale membership instead of failing the whole transition.
-                if (targetInitiallyManaged.Contains(h) && !_hidden.ContainsKey(h))
+                case TargetRestoreOutcome.Pruned:
                     st.Desktops[target].Remove(h);
-                else
+                    break;
+                case TargetRestoreOutcome.Failed:
+                    restorePending.Add(h);
+                    break;
+            }
+        }
+
+        // Batched backoff retry: a transient restore refusal (the window is being
+        // dragged, the app clamps its position) must not cancel the switch on the
+        // first try; the whole group waits only once per round.
+        for (int attempt = 2; restorePending.Count > 0 && attempt <= ParkAttemptCount; attempt++)
+        {
+            AppLog.Info(nameof(SwitchToCore),
+                $"Target restore failed for {restorePending.Count} window(s) " +
+                $"({string.Join(", ", restorePending)}); " +
+                $"retry {attempt}/{ParkAttemptCount} scheduled in {ParkRetryDelayMs} ms.");
+            Thread.Sleep(ParkRetryDelayMs);
+            var remaining = new List<IntPtr>();
+            foreach (var h in restorePending)
+            {
+                if (!Native.IsWindow(h)) continue; // destroyed while retrying
+                switch (TryRestoreTargetWindow(h, targetInitiallyManaged, targetSuccessfullyRestored))
                 {
-                    targetRestored = false;
-                    targetRestoreFailure = h;
+                    case TargetRestoreOutcome.Pruned:
+                        st.Desktops[target].Remove(h);
+                        break;
+                    case TargetRestoreOutcome.Failed:
+                        remaining.Add(h);
+                        break;
                 }
             }
+            restorePending = remaining;
+        }
+
+        if (restorePending.Count > 0)
+        {
+            targetRestored = false;
+            targetRestoreFailure = restorePending[0];
         }
 
         if (!targetRestored)
@@ -1989,6 +2051,25 @@ internal sealed class DesktopManager
         PersistHidden();
         DesktopSwitched?.Invoke(BuildInfo(st));
         return true;
+    }
+
+    private enum TargetRestoreOutcome { Restored, Pruned, Failed }
+
+    /// <summary>One restore attempt for a window of the target desktop. Pruned means the
+    /// HWND was reused (identity mismatch removed its record) and its stale membership
+    /// must be dropped instead of failing the whole transition.</summary>
+    private TargetRestoreOutcome TryRestoreTargetWindow(IntPtr h,
+        HashSet<IntPtr> targetInitiallyManaged, List<IntPtr> targetSuccessfullyRestored)
+    {
+        if (ShowOrUnparkManagedWindow(h))
+        {
+            if (targetInitiallyManaged.Contains(h))
+                targetSuccessfullyRestored.Add(h);
+            return TargetRestoreOutcome.Restored;
+        }
+        if (targetInitiallyManaged.Contains(h) && !_hidden.ContainsKey(h))
+            return TargetRestoreOutcome.Pruned;
+        return TargetRestoreOutcome.Failed;
     }
 
     /// <summary>
