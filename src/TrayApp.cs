@@ -113,6 +113,30 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(L.T("menu.overview"), null, (_, _) => OverviewForm.Toggle(_manager));
         menu.Items.Add(L.T("menu.restore"), null, (_, _) => _manager.RestoreAll());
 
+        // Hidden while shared taskbar mode is on: that mode already jumps to a parked window's desktop.
+        var jumpItem = new ToolStripMenuItem(L.T("menu.taskbarJump"))
+        {
+            Checked = _manager.TaskbarJump,
+            CheckOnClick = true,
+            Visible = !_manager.SharedTaskbar
+        };
+        bool jumpRestoring = false;
+        jumpItem.CheckedChanged += (_, _) =>
+        {
+            if (jumpRestoring) return;
+            bool requested = jumpItem.Checked;
+            if (!SettingsStore.SetBool("taskbarJump", requested))
+            {
+                jumpRestoring = true;
+                jumpItem.Checked = !requested;
+                jumpRestoring = false;
+                AppLog.Warning(nameof(BuildMenu),
+                    "Could not persist the taskbar jump preference; the change was reverted.");
+                return;
+            }
+            _manager.SetTaskbarJump(requested);
+        };
+
         var sharedItem = new ToolStripMenuItem(L.T("menu.sharedTaskbar"))
         {
             Checked = _manager.SharedTaskbar,
@@ -127,6 +151,7 @@ internal sealed class TrayApp : ApplicationContext
             if (_manager.SetSharedTaskbarMode(requestedMode) &&
                 SettingsStore.SetBool("sharedTaskbar", requestedMode))
             {
+                jumpItem.Visible = !_manager.SharedTaskbar;
                 return;
             }
 
@@ -139,8 +164,10 @@ internal sealed class TrayApp : ApplicationContext
                 $"Shared taskbar mode change failed (requested={requestedMode}, " +
                 $"kept={_manager.SharedTaskbar}). Showing balloon: {L.T("msg.sharedTaskbarFail")}");
             _tray.ShowBalloonTip(4000, "IndepenDesk", L.T("msg.sharedTaskbarFail"), ToolTipIcon.Warning);
+            jumpItem.Visible = !_manager.SharedTaskbar;
         };
         menu.Items.Add(sharedItem);
+        menu.Items.Add(jumpItem);
 
         var warnItem = new ToolStripMenuItem(L.T("menu.warnUnmanageable"))
         {

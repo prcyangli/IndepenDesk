@@ -16,6 +16,7 @@ Windows virtual desktops are global: pressing `Win+Ctrl+←/→` switches **all 
 - 🔔 **Compact on-screen indicator** after every switch, without a focus-stealing slide animation.
 - 🗂 **Overview screen** (`Ctrl+Alt+↑`) — Mission Control-like grid with drag & drop: move windows between desktops and monitors, move whole desktops to another monitor, right-click move menu.
 - 📌 **Shared taskbar** (optional, tray menu) — windows from all desktops stay on the taskbar and Alt-Tab; clicking one jumps straight to its desktop.
+- 🧲 **Taskbar jump** (default on, tray menu) — clicking a running single-instance app's taskbar/tray icon (e.g. an IM) switches to the desktop its window lives on instead of pulling the window to the current one.
 - 🌍 **8 languages** — English, Türkçe, Deutsch, Français, Italiano, Русский, 中文, 日本語 (auto-detected, changeable from the tray menu).
 - 🔄 **Update check** from the tray menu via GitHub Releases.
 - 🚀 **Starts with Windows** by default — can be turned off anytime from the tray menu.
@@ -59,6 +60,8 @@ By default the 4-finger swipe triggers Windows' **global** desktop switch. Overr
 ## How it works
 
 IndepenDesk does not use (and cannot fix) Windows' global virtual desktop system. Instead it keeps per-monitor window sets and, on a switch, hides/shows only the windows of that monitor (`ShowWindow`). Hidden windows also disappear from the taskbar and Alt-Tab, so it feels like a real desktop switch. New windows are adopted onto the active desktop of the monitor they appear on; windows dragged to another monitor follow it automatically.
+
+With the **taskbar jump** option (default on, tray menu) a single-instance app that re-shows its hidden window — taskbar/pinned icon, tray icon or notification click — makes IndepenDesk jump to that window's desktop instead of adopting the window into the current one, mirroring how Windows' own virtual desktops behave. Apps that create a brand-new window, or show one without activating it, still land on the current desktop.
 
 The optional **shared taskbar** mode (tray menu) parks windows of inactive desktops off-screen instead of hiding them. Every desktop's windows then remain on the taskbar and in Alt-Tab, and activating one jumps to its desktop. Parked placements are journaled like hidden ones, so a restart after a crash restores everything.
 

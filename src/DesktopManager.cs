@@ -104,6 +104,13 @@ internal sealed class DesktopManager
     /// </summary>
     public bool SharedTaskbar { get; private set; }
 
+    /// <summary>
+    /// Default (hidden) mode: when an app activates a window that belongs to another desktop
+    /// (taskbar/pinned or tray icon click of a single-instance app), jump to that desktop
+    /// instead of adopting the re-shown window into the current one.
+    /// </summary>
+    public bool TaskbarJump { get; private set; }
+
     /// <summary>Geçiş kesinleşti, pencereler henüz gizlenmedi: (cihaz, eski index, yeni index).
     /// Animasyon katmanının ekran görüntüsünü bu anda alması gerekir.</summary>
     public event Action<string, int, int>? SwitchStarting;
@@ -125,6 +132,7 @@ internal sealed class DesktopManager
     public DesktopManager()
     {
         SharedTaskbar = SettingsStore.GetBool("sharedTaskbar", false);
+        TaskbarJump = SettingsStore.GetBool("taskbarJump", true);
         string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "IndepenDesk");
         Directory.CreateDirectory(dir);
         // A user can have multiple interactive Windows sessions. Keep journals
@@ -2041,10 +2049,25 @@ internal sealed class DesktopManager
     private void MarkInternalMinimize(IntPtr h) =>
         _internalMinimizeUntil[h] = Environment.TickCount64 + MinimizeForegroundSuppressMs;
 
-    /// <summary>Foreground window changed (the taskbar/Alt-Tab activated a parked window): jump to the desktop it belongs to.</summary>
+    /// <summary>
+    /// Foreground window changed: jump to the desktop of a window that IndepenDesk keeps on
+    /// another desktop — parked in shared mode, hidden in default mode with taskbar jump.
+    /// </summary>
     public void HandleForegroundActivated(IntPtr h)
     {
-        if (!SharedTaskbar || _switchInProgress) return;
+        if (_switchInProgress) return;
+        if (SharedTaskbar)
+        {
+            HandleParkedForegroundActivated(h);
+            return;
+        }
+        if (TaskbarJump)
+            HandleHiddenForegroundActivated(h);
+    }
+
+    /// <summary>Shared mode: the taskbar/Alt-Tab activated a parked window — jump to the desktop it belongs to.</summary>
+    private void HandleParkedForegroundActivated(IntPtr h)
+    {
         long now = Environment.TickCount64;
         ExpireMinimizeMarkers(now);
         if (h == IntPtr.Zero || !_hidden.TryGetValue(h, out var record) || !record.Parked) return;
@@ -2108,6 +2131,62 @@ internal sealed class DesktopManager
         }
     }
 
+    /// <summary>
+    /// Default (hidden) mode with taskbar jump: the application re-showed and activated one of
+    /// our hidden windows (taskbar/pinned/tray icon click of a single-instance app). Jump to the
+    /// desktop the window belongs to instead of adopting it into the current one.
+    /// </summary>
+    private void HandleHiddenForegroundActivated(IntPtr h)
+    {
+        if (h == IntPtr.Zero || !_hidden.TryGetValue(h, out var record) || record.Parked) return;
+        if (!MatchesWindowIdentity(h, record))
+        {
+            AppLog.Warning(nameof(HandleForegroundActivated),
+                $"Hidden HWND={h} failed the identity check; taskbar jump ignored.");
+            return;
+        }
+
+        // The app already re-showed the window, so the membership lookup must not go through
+        // Sync(): it would adopt the visible window into the current desktop and drop the
+        // record this jump decision depends on.
+        _switchInProgress = true;
+        try
+        {
+            string? dev = Native.GetMonitorDeviceOfWindow(h);
+            foreach (var st in _monitors.Values)
+                for (int i = 0; i < st.Desktops.Count; i++)
+                    if (st.Desktops[i].Contains(h))
+                    {
+                        if (i != st.Current && st.Device == dev)
+                        {
+                            st.LastActive[i] = h;
+                            AppLog.Info(nameof(HandleForegroundActivated),
+                                $"Taskbar jump (hidden mode): HWND={h} -> '{st.Device}' desktop {i}.");
+                            SwitchToCore(st, i);
+                        }
+                        else if (i != st.Current)
+                        {
+                            // The app moved the window to another monitor before showing it:
+                            // leave it to Sync, which adopts it into that monitor's current desktop.
+                            AppLog.Info(nameof(HandleForegroundActivated),
+                                $"Re-shown HWND={h} now lives on '{dev}' (desktop owner '{st.Device}'); leaving it for Sync adoption.");
+                        }
+                        // i == st.Current cannot normally happen (hidden records exist only for
+                        // non-current desktops); if it ever does, let the next Sync clean up.
+                        return;
+                    }
+
+            // No desktop membership (e.g. a crash-recovery leftover): do not jump; the next
+            // Sync adopts the re-shown window into the current desktop as before.
+            AppLog.Info(nameof(HandleForegroundActivated),
+                $"Re-shown HWND={h} has no desktop membership; leaving it for Sync adoption.");
+        }
+        finally
+        {
+            _switchInProgress = false;
+        }
+    }
+
     /// <summary>Switch to the desktop containing the given window and hand it the focus; unminimize
     /// first when the window is minimized. Used by the double-click direct jump of window entries.</summary>
     public void SwitchToWindow(IntPtr h)
@@ -2141,6 +2220,14 @@ internal sealed class DesktopManager
         if (Native.GetForegroundWindow() != h)
             AppLog.Info(nameof(RestoreAndFocusWindow),
                 $"HWND={h} could not take the foreground (possibly elevated); desktop switch only.");
+    }
+
+    /// <summary>Taskbar jump needs no window-state transition; it only gates future foreground events.</summary>
+    public void SetTaskbarJump(bool enable)
+    {
+        if (TaskbarJump == enable) return;
+        TaskbarJump = enable;
+        AppLog.Info(nameof(SetTaskbarJump), $"Taskbar jump {(enable ? "enabled" : "disabled")}.");
     }
 
     /// <summary>Switch shared taskbar mode transactionally; commit the mode only after every window state has been updated.</summary>
