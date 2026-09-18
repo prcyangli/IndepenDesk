@@ -60,13 +60,13 @@ Per impostazione predefinita lo scorrimento a quattro dita attiva il cambio **gl
 
 IndepenDesk non usa il sistema globale di Windows. Gestisce insiemi di finestre per monitor e, al cambio, nasconde/mostra solo le finestre di quel monitor (`ShowWindow`). Le finestre nascoste spariscono anche dalla barra delle applicazioni e da Alt-Tab. Le nuove finestre vengono assegnate al desktop attivo del loro monitor.
 
-La modalità opzionale **barra delle applicazioni condivisa** (menu della barra di sistema) sposta le finestre dei desktop inattivi fuori schermo invece di nasconderle. Le finestre di tutti i desktop restano così nella barra e in Alt-Tab, e attivarne una passa al suo desktop. Le posizioni parcheggiate vengono registrate su disco come le finestre nascoste e ripristinate al riavvio dopo un crash.
+La modalità opzionale **barra delle applicazioni condivisa** (menu della barra di sistema) parcheggia le finestre dei desktop inattivi minimizzandole sul posto invece di nasconderle. Le finestre di tutti i desktop restano così nella barra e in Alt-Tab, e attivarne una passa al suo desktop. Le posizioni parcheggiate vengono registrate su disco come le finestre nascoste e ripristinate al riavvio dopo un crash.
 
 ## Limitazioni note
 
 - Le finestre delle app con privilegi elevati non possono essere nascoste, a meno che IndepenDesk non sia eseguito come amministratore.
 - Le gesture "Collegamento personalizzato" del touchpad sono pressioni di tasti sintetiche: quando una finestra con privilegi elevati è attiva, la sicurezza di Windows (UIPI) le ignora e le gesture smettono di funzionare. Le scorciatoie della tastiera fisica e il menu della barra restano utilizzabili.
-- In modalità barra condivisa, le finestre parcheggiate continuano a essere renderizzate (uso GPU/CPU leggermente superiore rispetto alla nasconditura). Se il processo viene terminato in questa modalità, riavvia IndepenDesk 0.4.4+ per riportare a schermo le finestre parcheggiate (le versioni precedenti non leggono il formato v3 del journal).
+- In modalità barra condivisa, le finestre parcheggiate vengono minimizzate sul posto (il rendering si interrompe). Se il processo viene terminato in questa modalità, restano semplicemente minimizzate: ripristinale dalla barra delle applicazioni, oppure riavvia IndepenDesk 0.4.4+ per farle gestire di nuovo (le versioni precedenti non leggono il formato v3 del journal).
 - Il nativo `Win+Ctrl+←/→` attiva ancora il cambio globale — basta non usarlo.
 - `Ctrl+Alt+←/→` può entrare in conflitto con le scorciatoie Intel "ruota schermo"; disattivale se necessario.
 - Il menu contestuale della barra delle applicazioni di Windows 11 non è estendibile; usa il menu della panoramica.

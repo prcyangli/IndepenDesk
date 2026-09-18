@@ -60,13 +60,13 @@ Standardmäßig löst das Vier-Finger-Wischen den **globalen** Windows-Wechsel a
 
 IndepenDesk nutzt nicht das globale System von Windows. Stattdessen verwaltet es Fenstermengen pro Monitor und blendet beim Wechsel nur die Fenster dieses Monitors aus/ein (`ShowWindow`). Versteckte Fenster verschwinden auch aus Taskleiste und Alt-Tab. Neue Fenster werden dem aktiven Desktop ihres Monitors zugeordnet.
 
-Der optionale Modus **Gemeinsame Taskleiste** (Tray-Menü) parkt Fenster inaktiver Desktops statt sie auszublenden einfach außerhalb des Bildschirms. Damit bleiben die Fenster aller Desktops in Taskleiste und Alt-Tab sichtbar, und das Aktivieren eines Fensters wechselt zu seinem Desktop. Geparkte Positionen werden wie versteckte protokolliert und nach einem Absturz beim nächsten Start wiederhergestellt.
+Der optionale Modus **Gemeinsame Taskleiste** (Tray-Menü) parkt Fenster inaktiver Desktops, indem er sie an Ort und Stelle minimiert, statt sie auszublenden. Damit bleiben die Fenster aller Desktops in Taskleiste und Alt-Tab sichtbar, und das Aktivieren eines Fensters wechselt zu seinem Desktop. Geparkte Positionen werden wie versteckte protokolliert und nach einem Absturz beim nächsten Start wiederhergestellt.
 
 ## Bekannte Einschränkungen
 
 - Fenster von Programmen mit Administratorrechten können nur versteckt werden, wenn IndepenDesk selbst als Administrator läuft.
 - „Benutzerdefinierte" Touchpad-Gesten sind synthetische Tastendrücke: Solange ein Fenster mit Administratorrechten fokussiert ist, verwirft die Windows-Sicherheit (UIPI) sie, und die Gesten wirken nicht mehr. Physische Tastenkürzel und das Tray-Menü funktionieren weiterhin — nutzen Sie dann diese.
-- Im Modus „Gemeinsame Taskleiste“ rendern geparkte Fenster weiter (etwas höherer GPU-/CPU-Verbrauch als beim Ausblenden). Wird der Prozess in diesem Modus abgeschossen, starten Sie IndepenDesk 0.4.4+ erneut, um die geparkten Fenster zurückzuholen (ältere Versionen können das v3-Journalformat nicht lesen).
+- Im Modus „Gemeinsame Taskleiste“ werden geparkte Fenster an Ort und Stelle minimiert (das Rendering stoppt). Wird der Prozess in diesem Modus abgeschossen, bleiben sie einfach minimiert: Stellen Sie sie über die Taskleiste wieder her, oder starten Sie IndepenDesk 0.4.4+ erneut, damit sie wieder verwaltet werden (ältere Versionen können das v3-Journalformat nicht lesen).
 - Das native `Win+Strg+←/→` löst weiterhin den globalen Wechsel aus — einfach nicht verwenden.
 - `Strg+Alt+←/→` kann mit Intel-Grafik-Hotkeys („Bildschirm drehen") kollidieren; ggf. in den Intel-Einstellungen deaktivieren.
 - Das Kontextmenü der Windows-11-Taskleiste ist nicht erweiterbar; nutzen Sie das Rechtsklick-Menü der Übersicht.

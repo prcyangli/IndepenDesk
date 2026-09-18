@@ -60,13 +60,13 @@ Par défaut, le balayage à quatre doigts déclenche le changement **global** de
 
 IndepenDesk n'utilise pas le système global de Windows. Il gère des ensembles de fenêtres par moniteur et, lors d'un changement, masque/affiche uniquement les fenêtres de ce moniteur (`ShowWindow`). Les fenêtres masquées disparaissent aussi de la barre des tâches et d'Alt-Tab. Les nouvelles fenêtres sont rattachées au bureau actif de leur moniteur.
 
-Le mode optionnel **barre des tâches partagée** (menu de notification) parque les fenêtres des bureaux inactifs hors écran au lieu de les masquer. Les fenêtres de tous les bureaux restent alors dans la barre des tâches et Alt-Tab, et en activer une bascule vers son bureau. Les positions parquées sont journalisées comme les fenêtres masquées et restaurées au démarrage suivant un plantage.
+Le mode optionnel **barre des tâches partagée** (menu de notification) parque les fenêtres des bureaux inactifs en les réduisant sur place au lieu de les masquer. Les fenêtres de tous les bureaux restent alors dans la barre des tâches et Alt-Tab, et en activer une bascule vers son bureau. Les positions parquées sont journalisées comme les fenêtres masquées et restaurées au démarrage suivant un plantage.
 
 ## Limitations connues
 
 - Les fenêtres des applications élevées (admin) ne peuvent pas être masquées, sauf si IndepenDesk est lui-même lancé en administrateur.
 - Les gestes « Raccourci personnalisé » du pavé tactile sont des frappes synthétisées : lorsqu'une fenêtre élevée (admin) est active, la sécurité Windows (UIPI) les ignore et les gestes cessent de fonctionner. Les raccourcis au clavier physique et le menu de la zone de notification restent utilisables.
-- En mode barre des tâches partagée, les fenêtres parquées continuent de se dessiner (légère hausse GPU/CPU par rapport au masquage). Si le processus est tué dans ce mode, relancez IndepenDesk 0.4.4+ pour ramener les fenêtres parquées à l'écran (les versions antérieures ne lisent pas le format v3 du journal).
+- En mode barre des tâches partagée, les fenêtres parquées sont réduites sur place (le rendu s'arrête). Si le processus est tué dans ce mode, elles restent simplement réduites : restaurez-les depuis la barre des tâches, ou relancez IndepenDesk 0.4.4+ pour qu'elles soient reprises en charge (les versions antérieures ne lisent pas le format v3 du journal).
 - Le raccourci natif `Win+Ctrl+←/→` déclenche toujours le changement global — il suffit de ne pas l'utiliser.
 - `Ctrl+Alt+←/→` peut entrer en conflit avec les raccourcis Intel « rotation de l'écran » ; désactivez-les si besoin.
 - Le menu contextuel de la barre des tâches de Windows 11 n'est pas extensible ; utilisez le menu contextuel de la vue d'ensemble.

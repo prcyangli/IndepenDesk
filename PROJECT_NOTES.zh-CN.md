@@ -1,8 +1,18 @@
 # IndepenDesk 本地修改与审查记录
 
-更新日期：2026-09-18（v0.4.13）
+更新日期：2026-09-18（v0.4.15）
 
 本文记录基于 `main` 分支（原始基线提交 `21c9b74`）完成的本地功能修改、代码审查结论、本轮修复状态和验证清单。
+
+## v0.4.15：共享任务栏停车机制重设计——最小化停车（2026-09-18）
+
+- **问题**：共享任务栏模式下外接屏每切一次桌面就频闪，且内屏连带闪一下。本机日志 + HWND 身份排查定位：① `SetWindowPos` 把最大化窗口移出屏幕是"返回成功但位置 ~100–500 ms 后才异步落定"的（Windows Terminal/VS Code/Chrome 等最重），`TryParkOnce` 调用后立即校验必然误读为拒绝 → 重发命令 → 窗口在搬走/原地之间弹跳 2 次/每次切换，日志保真对应 `Parking verification failed ... retry 2/6, 3/6`；② 切到空桌面时前台落在刚被停车的窗口上，焦点兜底静默 `SetForegroundWindow(Shell_TrayWnd)` 打到主屏（内屏）任务栏；且该机器只显示主屏任务栏（无 `Shell_SecondaryTrayWnd`）。诊断构建（`[diag]` 日志）确认切换期间对内屏窗口零调用后，以上两条为仅剩的软件归因。
+- **修复一（核心）：普通/最大化窗口改停"最小化停车"**——`TryParkOnce` 非 iconic 分支用 `SW_SHOWMINNOACTIVE` 原地最小化（shell/DWM 立即生效，无位置注射），几何完全不动，`rcNormalPosition` 保留记录的原屏矩形；任务栏按钮保留，共享语义不变。`IsManagedWindowParked` 简化为"iconic 即停车"。`UnparkManagedWindow` 恢复时按 `SavedShowCmd`：最大化走 `SetWindowPlacement(SW_SHOWMAXIMIZED)`、普通走 `SW_SHOWNOACTIVATE`；用户原本就最小化的窗口恢复时仍保持最小化。`RepositionParkedWindow` 跨屏时不再把 `SavedShowCmd` 覆写为最小化（否则最大化的停车窗恢复不最大化）。副作用收益：崩溃中止进程时窗口只是保持最小化，天然可恢复。
+- **修复二：批量落定等待**。第一波停车命令全部发出后，整组一次最多 250 ms 轮询等状态落定（`HasParkLanded`），落定即完成，避免为"瞬读拒绝"白白消耗重试轮并重发命令（重发命令正是弹跳的放大器）；真失败仍走原 6×100 ms 批量退避。
+- **修复三：停车跳转绕过 `Sync()`**。最小化停车下点任务栏按钮会先由 shell 恢复窗口再激活，`HandleParkedForegroundActivated` 原先先 `Sync()` 会把"已回屏的停车窗口"收养进当前桌面并删记录，跳转丢失（点一个收养一个 = "全部恢复到当前桌面"）。与隐藏模式 `HandleHiddenForegroundActivated` 同款陷阱同款修法：直接查归属桌面再 `SwitchToCore`。
+- **修复四：焦点兜底按显示器就近**。新增 `FindTrayForDisplay`：切换后前台落在停车窗口时，优先激活被切换显示器的次任务栏，无次任务栏时才回退主任务栏，避免无谓激活另一显示器的任务栏。
+- **验证**：真机（双屏 1536×960 内屏 + 2560×1440 外屏、Windows 11 25H2 build 26200，Windows Terminal/VS Code/Chrome 最大化窗口分跨 3 个外屏桌面）：外屏切换顺滑无弹跳、内屏不再闪；任务栏按钮点击正确跳回窗口原桌面，窗口恢复的最大化状态正确；切换耗时从 ~450 ms 降至一次事件内完成；Release 编译 0 警告 0 错误。
+- **遗留**：应用"代客最小化"时若 shell 把前台交给停车中的最小化窗口，该窗口可能出现在当前桌面（有日志兜底）；屏幕录制/共享类软件（本机存在 Sharing Monitor 虚拟显卡）在 DWM 大变动下的自身抖动与本项目无关。
 
 ## v0.4.13：任务栏激活跳转到窗口所在桌面（2026-09-18）
 

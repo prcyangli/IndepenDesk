@@ -63,13 +63,13 @@ IndepenDesk does not use (and cannot fix) Windows' global virtual desktop system
 
 With the **taskbar jump** option (default on, tray menu) a single-instance app that re-shows its hidden window — taskbar/pinned icon, tray icon or notification click — makes IndepenDesk jump to that window's desktop instead of adopting the window into the current one, mirroring how Windows' own virtual desktops behave. Apps that create a brand-new window, or show one without activating it, still land on the current desktop.
 
-The optional **shared taskbar** mode (tray menu) parks windows of inactive desktops off-screen instead of hiding them. Every desktop's windows then remain on the taskbar and in Alt-Tab, and activating one jumps to its desktop. Parked placements are journaled like hidden ones, so a restart after a crash restores everything.
+The optional **shared taskbar** mode (tray menu) parks windows of inactive desktops by minimizing them in place instead of hiding them. Every desktop's windows then remain on the taskbar and in Alt-Tab, and activating one jumps to its desktop. Parked placements are journaled like hidden ones, so a restart after a crash restores everything.
 
 ## Known limitations
 
 - Windows of elevated (admin) apps cannot be hidden unless IndepenDesk itself runs as admin.
 - Touchpad "custom shortcut" gestures are synthesized keystrokes: while an elevated (admin) window is focused, Windows security (UIPI) drops them, so swipes stop switching. The physical keyboard shortcuts and the tray menu keep working — use those then.
-- In shared-taskbar mode, parked windows keep rendering (slightly higher GPU/CPU use than hiding). If the app is killed in this mode, start IndepenDesk 0.4.4+ again to bring parked windows back on-screen (earlier versions cannot read the v3 journal format).
+- In shared-taskbar mode, parked windows are minimized in place and stop rendering. If the app is killed in this mode, they simply stay minimized — restore them from the taskbar, or start IndepenDesk 0.4.4+ again to have them re-managed automatically (earlier versions cannot read the v3 journal format).
 - The native `Win+Ctrl+←/→` still triggers Windows' global switch — simply don't use it.
 - `Ctrl+Alt+←/→` may clash with Intel graphics "rotate screen" hotkeys; disable those in the Intel graphics settings if needed (a tray notification tells you when registration fails).
 - Windows 11's taskbar context menu cannot be extended by third-party apps; use the Overview's right-click menu instead.

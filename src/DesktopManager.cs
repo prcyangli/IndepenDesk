@@ -71,6 +71,13 @@ internal sealed class DesktopManager
     // retries, at most 6 attempts with 100 ms between rounds, adding ≤500 ms to a switch.
     private const int ParkAttemptCount = 6;
     private const int ParkRetryDelayMs = 100;
+    // Some applications apply window-state changes asynchronously (position clamps,
+    // throttled background renderers). A state read taken immediately after the API
+    // call can therefore misread a pending change as a refusal; give the batch one
+    // bounded settle wait before spending retry rounds (and re-issuing commands,
+    // which is what made windows visibly bounce).
+    private const int ParkVerifyPollDelayMs = 25;
+    private const int ParkVerifyPollCount = 10;
     private const int ParkAnchorThickness = 2;
     private const int ParkRectTolerance = 2;
     private const int MinimizeForegroundSuppressMs = 750;
@@ -100,7 +107,8 @@ internal sealed class DesktopManager
     private static readonly bool OwnProcessElevated = Native.IsOwnProcessElevated();
 
     /// <summary>
-    /// Shared taskbar mode: windows on non-current desktops are not hidden but parked off-screen.
+    /// Shared taskbar mode: windows on non-current desktops are not hidden but parked
+    /// (minimized in place; edge-anchored when already minimized at capture).
     /// They stay in the taskbar/Alt-Tab; activating one jumps to its desktop automatically.
     /// </summary>
     public bool SharedTaskbar { get; private set; }
@@ -731,6 +739,14 @@ internal sealed class DesktopManager
     }
 
     // ---------- Shared taskbar mode: off-screen parking ----------
+    //
+    // Normal & maximized windows are parked by MINIMIZING them (geometry untouched,
+    // restore rectangle stays at the recorded on-screen position): a minimize is
+    // applied immediately by the shell/DWM, while SetWindowPos to an off-screen
+    // position takes ~500 ms to land for maximized windows (the window visibly
+    // bounces in and out on every switch). The taskbar button is kept, preserving
+    // shared taskbar semantics; unparking restores the recorded state normally.
+    // Windows already minimized at capture time keep position-anchored parking.
 
     private static Rectangle FromRECT(Native.RECT r) =>
         Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom);
@@ -928,7 +944,10 @@ internal sealed class DesktopManager
     {
         if (!record.Parked) return false;
         bool iconic = Native.IsIconic(h);
-        if (WasSavedMinimized(record) && iconic) return true;
+        // Any minimized window with a parked record is logically parked: normal and
+        // maximized windows are parked by minimizing them, and apps (Chromium & co.)
+        // rewriting rcNormalPosition cannot break that representation.
+        if (iconic) return true;
         if (!TryGetEffectiveWindowRect(h, out Rectangle actual)) return false;
         if (!IntersectsAnyScreen(actual)) return true;
         if (!WasSavedMinimized(record) || !IsEffectivelyParkedRect(actual)) return false;
@@ -997,7 +1016,7 @@ internal sealed class DesktopManager
     }
 
     /// <summary>A single parking attempt: right after the API call, save the result and error code, then collect
-    /// the snapshot and verify the window is fully off-screen. Only the current window state is refreshed; the
+    /// the snapshot and verify the parked state. Only the current window state is refreshed; the
     /// recovery geometry captured first time is never touched (c.Record stays unchanged).</summary>
     private (ParkOutcome Outcome, ParkAttemptDiag? Diag) TryParkOnce(ParkCandidate c)
     {
@@ -1041,8 +1060,13 @@ internal sealed class DesktopManager
         }
         else
         {
-            applied = Native.SetWindowPos(c.Handle, IntPtr.Zero, c.ParkRect.X, c.ParkRect.Y, 0, 0,
-                Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+            // Park normal & maximized windows by minimizing them: the shell applies
+            // a minimize immediately and atomically, whereas SetWindowPos to an
+            // off-screen rectangle needs ~500 ms to land for a maximized window and
+            // makes it visibly bounce (see the section comment above). The geometry
+            // stays exactly where it was; unparking restores the recorded state.
+            MarkInternalMinimize(c.Handle);
+            applied = Native.ShowWindow(c.Handle, Native.SW_SHOWMINNOACTIVE);
             if (!applied) win32Error = Marshal.GetLastWin32Error();
         }
 
@@ -1067,11 +1091,26 @@ internal sealed class DesktopManager
         }
         else
         {
-            parked = applied && IsWindowOffScreen(c.Handle);
+            parked = applied && Native.IsIconic(c.Handle);
         }
         return (parked ? ParkOutcome.Parked : ParkOutcome.Failed,
             new ParkAttemptDiag(applied, win32Error, true, visible, iconic, zoomed,
                 windowRect, normalRect, showCmd));
+    }
+
+    /// <summary>Whether a park issued earlier has by now landed (the same predicate as
+    /// TryParkOnce's verification, re-evaluated after a settle wait — cheap, no API calls
+    /// against the window beyond placement/rect queries).</summary>
+    private static bool HasParkLanded(ParkCandidate c)
+    {
+        if (!Native.IsWindow(c.Handle)) return false;
+        if (!c.WasIconic)
+            return Native.IsIconic(c.Handle);
+        if (!Native.IsIconic(c.Handle)) return false;
+        var pl = new Native.WINDOWPLACEMENT { length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>() };
+        if (!Native.GetWindowPlacement(c.Handle, ref pl)) return false;
+        Rectangle normal = FromRECT(pl.rcNormalPosition);
+        return RectApproximatelyEquals(normal, c.ParkRect) && IsEffectivelyParkedRect(normal);
     }
 
     /// <summary>Restore a managed window on-screen according to its record; does not touch _hidden or the logs (the caller handles those).</summary>
@@ -1235,9 +1274,10 @@ internal sealed class DesktopManager
     }
 
     /// <summary>
-    /// Parks the manageable windows of a desktop off-screen. Windows that are known
-    /// to be outside our integrity boundary are skipped and stay visible. Operational
-    /// failures are transient: roll this attempt back and let a later switch retry.
+    /// Parks the manageable windows of a desktop (see the section comment for the two
+    /// parking representations). Windows that are known to be outside our integrity
+    /// boundary are skipped and stay visible. Operational failures are transient:
+    /// roll this attempt back and let a later switch retry.
     /// </summary>
     private bool ParkManagedWindows(IEnumerable<IntPtr> handles)
     {
@@ -1297,7 +1337,19 @@ internal sealed class DesktopManager
                 pending.Add(c);
         }
 
-        // Batched backoff retry: the whole group waits only once per round (250 ms), so the number of failed windows does not amplify the total delay.
+        // The first pass may have misread a still-pending state change as a refusal
+        // (some applications apply them asynchronously — see ParkVerifyPollDelayMs).
+        // Give the whole group ONE bounded settle wait before spending retry rounds:
+        // a change that lands on its own then consumes no retry and, crucially,
+        // no second command is issued, so the window does not visibly bounce in and
+        // out of the parked state.
+        for (int i = 0; i < ParkVerifyPollCount && pending.Count > 0; i++)
+        {
+            Thread.Sleep(ParkVerifyPollDelayMs);
+            pending.RemoveAll(HasParkLanded);
+        }
+
+        // Batched backoff retry: the whole group waits only once per round (100 ms), so the number of failed windows does not amplify the total delay.
         for (int attempt = 2; pending.Count > 0 && attempt <= ParkAttemptCount; attempt++)
         {
             AppLog.Info(nameof(ParkManagedWindows),
@@ -1364,8 +1416,8 @@ internal sealed class DesktopManager
 
     private static string DescribeParkFailure(ParkCandidate c, ParkAttemptDiag d, bool rolledBack)
     {
-        string api = c.WasIconic ? "SetWindowPlacement" : "SetWindowPos";
-        string mode = c.WasIconic ? "minimized-edge-anchor" : "normal-offscreen";
+        string api = c.WasIconic ? "SetWindowPlacement" : "ShowWindow(SW_SHOWMINNOACTIVE)";
+        string mode = c.WasIconic ? "minimized-edge-anchor" : "minimized-in-place";
         Rectangle? effective = d.IsIconic ? d.NormalRect : d.WindowRect;
         string visiblePixels = effective.HasValue
             ? VisibleIntersectionPixels(effective.Value).ToString()
@@ -1426,6 +1478,31 @@ internal sealed class DesktopManager
         {
             AppLog.Warning(nameof(UnparkManagedWindow), $"Could not restore parked HWND={h}.");
             return false;
+        }
+        if (Native.IsIconic(h) && !WasSavedMinimized(record))
+        {
+            // This window was normal/maximized when recorded: we minimized it to
+            // park it (geometry untouched). Bring it back in its recorded state.
+            // A genuinely user-minimized window (WasSavedMinimized) stays minimized.
+            if (record.SavedShowCmd == Native.SW_SHOWMAXIMIZED)
+            {
+                var pl = new Native.WINDOWPLACEMENT { length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>() };
+                if (Native.GetWindowPlacement(h, ref pl))
+                {
+                    pl.showCmd = Native.SW_SHOWMAXIMIZED;
+                    Native.SetWindowPlacement(h, ref pl);
+                }
+            }
+            else
+            {
+                Native.ShowWindow(h, Native.SW_SHOWNOACTIVATE);
+            }
+            if (Native.IsIconic(h))
+            {
+                AppLog.Warning(nameof(UnparkManagedWindow),
+                    $"HWND={h} could not be restored from its parking minimize.");
+                return false;
+            }
         }
         if (!Native.IsWindowVisible(h))
         {
@@ -1681,7 +1758,7 @@ internal sealed class DesktopManager
         {
             if (!IsEligible(h)) continue;
 
-            // Shared taskbar mode: a window parked off-screen keeps its desktop membership;
+            // Shared taskbar mode: a parked window keeps its desktop membership;
             // its taskbar button is the entry point for jumping back to that desktop.
             if (_hidden.TryGetValue(h, out var parkedRecord) && parkedRecord.Parked &&
                 MatchesWindowIdentity(h, parkedRecord) && IsManagedWindowParked(h, parkedRecord))
@@ -2126,7 +2203,9 @@ internal sealed class DesktopManager
             IntPtr now = Native.GetForegroundWindow();
             if (now != IntPtr.Zero && _hidden.TryGetValue(now, out var rec) && rec.Parked)
             {
-                IntPtr tray = Native.FindWindow("Shell_TrayWnd", null);
+                IntPtr tray = FindTrayForDisplay(st.Device);
+                if (tray == IntPtr.Zero)
+                    tray = Native.FindWindow("Shell_TrayWnd", null);
                 if (tray != IntPtr.Zero)
                     Native.SetForegroundWindow(tray);
             }
@@ -2227,6 +2306,24 @@ internal sealed class DesktopManager
             Native.SetForegroundWindow(tray);
     }
 
+    /// <summary>The secondary taskbar hosted on the given display. Used for focus
+    /// fallbacks so activation stays on the display being switched instead of
+    /// jumping to the primary taskbar (which lives on another monitor and makes
+    /// that screen flicker).</summary>
+    private static IntPtr FindTrayForDisplay(string device)
+    {
+        IntPtr found = IntPtr.Zero;
+        Native.EnumWindows((h, _) =>
+        {
+            if (found == IntPtr.Zero &&
+                Native.GetWindowClass(h) == "Shell_SecondaryTrayWnd" &&
+                Native.GetMonitorDeviceOfWindow(h) == device)
+                found = h;
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
     private void MarkInternalMinimize(IntPtr h) =>
         _internalMinimizeUntil[h] = Environment.TickCount64 + MinimizeForegroundSuppressMs;
 
@@ -2283,7 +2380,11 @@ internal sealed class DesktopManager
         _switchInProgress = true;
         try
         {
-            Sync();
+            // A taskbar/Alt-Tab click on a window parked-by-minimizing restores it
+            // on screen BEFORE activating it. The membership lookup must therefore
+            // not go through Sync(): it would adopt the visible window into the
+            // current desktop and drop the record this jump decision depends on
+            // (the same trap the hidden-mode jump documents in HandleHiddenForegroundActivated).
             foreach (var st in _monitors.Values)
                 for (int i = 0; i < st.Desktops.Count; i++)
                     if (st.Desktops[i].Contains(h))
@@ -2984,7 +3085,9 @@ internal sealed class DesktopManager
             NormalTop = mapped.Top,
             NormalRight = mapped.Right,
             NormalBottom = mapped.Bottom,
-            SavedShowCmd = iconic ? Native.SW_SHOWMINIMIZED : rec.SavedShowCmd,
+            // SavedShowCmd is deliberately kept: a normal/maximized window parked by
+            // minimizing must remember its recorded state across displays too, or it
+            // would come back as merely-minimized on the target display.
             ParkMonitor = dstDevice
         };
         var target = new ParkCandidate(h, updated, park, iconic);
