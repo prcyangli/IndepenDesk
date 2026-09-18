@@ -84,7 +84,8 @@ internal sealed class DesktopManager
     private string? _lastPersisted;
     private long _hiddenVersion;
     private long _persistedHiddenVersion = -1;
-    private readonly Dictionary<uint, ObservedProcessIdentity?> _syncProcessIdentities = new();
+    private readonly Dictionary<uint, ObservedProcessIdentity?> _processIdentityCache = new();
+    private int _identityCacheDepth;
     private readonly Dictionary<IntPtr, UnmanageableWindow> _unmanageable = new();
     private bool _syncInProgress;
     private bool _stateFileBlocked;
@@ -369,7 +370,7 @@ internal sealed class DesktopManager
                 pid != record.ProcessId) return false;
 
             ObservedProcessIdentity? identity;
-            if (_syncInProgress && _syncProcessIdentities.TryGetValue(pid, out identity))
+            if (_identityCacheDepth > 0 && _processIdentityCache.TryGetValue(pid, out identity))
             {
                 return identity is { } cached && cached.SessionId == record.SessionId &&
                        cached.ProcessStartTimeUtcTicks == record.ProcessStartTimeUtcTicks;
@@ -379,8 +380,8 @@ internal sealed class DesktopManager
             identity = new ObservedProcessIdentity(
                 process.StartTime.ToUniversalTime().Ticks,
                 process.SessionId);
-            if (_syncInProgress)
-                _syncProcessIdentities[pid] = identity;
+            if (_identityCacheDepth > 0)
+                _processIdentityCache[pid] = identity;
             return identity.Value.SessionId == record.SessionId &&
                    identity.Value.ProcessStartTimeUtcTicks == record.ProcessStartTimeUtcTicks;
         }
@@ -389,9 +390,9 @@ internal sealed class DesktopManager
             if (Native.IsWindow(h))
                 AppLog.Warning(nameof(MatchesWindowIdentity),
                     $"Identity check failed for a live HWND={h}: {ex.GetType().Name}: {ex.Message}.");
-            if (_syncInProgress &&
+            if (_identityCacheDepth > 0 &&
                 Native.GetWindowThreadProcessId(h, out uint failedPid) != 0 && failedPid != 0)
-                _syncProcessIdentities[failedPid] = null;
+                _processIdentityCache[failedPid] = null;
             return false;
         }
     }
@@ -1521,16 +1522,33 @@ internal sealed class DesktopManager
             return SyncCore();
 
         _syncInProgress = true;
-        _syncProcessIdentities.Clear();
+        BeginIdentityCache();
         try
         {
             return SyncCore();
         }
         finally
         {
-            _syncProcessIdentities.Clear();
+            EndIdentityCache();
             _syncInProgress = false;
         }
+    }
+
+    /// <summary>
+    /// Opens a batch scope for the per-PID identity cache: within one sync or desktop
+    /// transaction every process is queried (GetProcessById + StartTime) at most once,
+    /// instead of once per window per hide/restore verification.
+    /// </summary>
+    private void BeginIdentityCache()
+    {
+        if (_identityCacheDepth++ == 0)
+            _processIdentityCache.Clear();
+    }
+
+    private void EndIdentityCache()
+    {
+        if (--_identityCacheDepth == 0)
+            _processIdentityCache.Clear();
     }
 
     private bool SyncCore()
@@ -1804,6 +1822,19 @@ internal sealed class DesktopManager
     /// genel bakışın açık kalabilmesi için yeni masaüstüne geçiş yapmaz.</summary>
     public bool CreateDesktopAndMoveWindow(IntPtr h, string dstDevice)
     {
+        BeginIdentityCache();
+        try
+        {
+            return CreateDesktopAndMoveWindowCore(h, dstDevice);
+        }
+        finally
+        {
+            EndIdentityCache();
+        }
+    }
+
+    private bool CreateDesktopAndMoveWindowCore(IntPtr h, string dstDevice)
+    {
         Sync();
         if (!Native.IsWindow(h)) return false;
         if (!_monitors.TryGetValue(dstDevice, out var dst)) return false;
@@ -1844,6 +1875,19 @@ internal sealed class DesktopManager
     /// İlk masaüstü kapatılırsa pencereler ikinci masaüstüne gider. Her monitörde
     /// en az bir masaüstü kalır.</summary>
     public bool DeleteDesktop(string device, int localIndex)
+    {
+        BeginIdentityCache();
+        try
+        {
+            return DeleteDesktopCore(device, localIndex);
+        }
+        finally
+        {
+            EndIdentityCache();
+        }
+    }
+
+    private bool DeleteDesktopCore(string device, int localIndex)
     {
         Sync();
         if (!_monitors.TryGetValue(device, out var st)) return false;
@@ -1903,12 +1947,14 @@ internal sealed class DesktopManager
     {
         bool ownsGuard = !_switchInProgress;
         if (ownsGuard) _switchInProgress = true;
+        BeginIdentityCache();
         try
         {
             return SwitchToCoreGuarded(st, target);
         }
         finally
         {
+            EndIdentityCache();
             if (ownsGuard) _switchInProgress = false;
         }
     }
@@ -2341,6 +2387,19 @@ internal sealed class DesktopManager
     public bool SetSharedTaskbarMode(bool enable)
     {
         if (enable == SharedTaskbar) return true;
+        BeginIdentityCache();
+        try
+        {
+            return SetSharedTaskbarModeCore(enable);
+        }
+        finally
+        {
+            EndIdentityCache();
+        }
+    }
+
+    private bool SetSharedTaskbarModeCore(bool enable)
+    {
         Sync();
 
         if (enable)
@@ -2476,6 +2535,19 @@ internal sealed class DesktopManager
     /// (e.g. an elevated one) is not moved and no desktop is created; the UI is notified.</summary>
     public void MoveActiveWindow(int delta)
     {
+        BeginIdentityCache();
+        try
+        {
+            MoveActiveWindowCore(delta);
+        }
+        finally
+        {
+            EndIdentityCache();
+        }
+    }
+
+    private void MoveActiveWindowCore(int delta)
+    {
         IntPtr fg = Native.GetForegroundWindow();
         if (fg == IntPtr.Zero || !IsEligible(fg)) return;
         // When the active window cannot be controlled (e.g. an elevated window), moving is
@@ -2516,6 +2588,19 @@ internal sealed class DesktopManager
     /// <summary>Bir pencereyi herhangi bir monitörün herhangi bir masaüstüne taşır
     /// (genel bakıştaki sürükle-bırak ve sağ tık menüsü bunu kullanır).</summary>
     public void MoveWindowToDesktop(IntPtr h, string dstDevice, int dstLocal)
+    {
+        BeginIdentityCache();
+        try
+        {
+            MoveWindowToDesktopCore(h, dstDevice, dstLocal);
+        }
+        finally
+        {
+            EndIdentityCache();
+        }
+    }
+
+    private void MoveWindowToDesktopCore(IntPtr h, string dstDevice, int dstLocal)
     {
         Sync();
         if (!Native.IsWindow(h)) return;
@@ -2565,6 +2650,19 @@ internal sealed class DesktopManager
 
     /// <summary>Bir masaüstünü aynı veya başka monitörde belirtilen ekleme konumuna taşır.</summary>
     public bool MoveDesktop(string srcDevice, int srcLocal, string dstDevice, int dstInsertIndex)
+    {
+        BeginIdentityCache();
+        try
+        {
+            return MoveDesktopCore(srcDevice, srcLocal, dstDevice, dstInsertIndex);
+        }
+        finally
+        {
+            EndIdentityCache();
+        }
+    }
+
+    private bool MoveDesktopCore(string srcDevice, int srcLocal, string dstDevice, int dstInsertIndex)
     {
         Sync();
         if (!_monitors.TryGetValue(srcDevice, out var src)) return false;
