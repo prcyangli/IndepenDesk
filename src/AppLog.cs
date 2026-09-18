@@ -132,12 +132,13 @@ internal static class AppLog
         {
             lock (FileGate)
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(LogFile)!);
-                if (File.Exists(LogFile) && new FileInfo(LogFile).Length >= MaxLogBytes)
-                    File.Move(LogFile, LogFile + ".previous", overwrite: true);
                 long dropped = Interlocked.Exchange(ref _droppedLines, 0);
                 if (dropped > 0)
                     batch.Insert(0, $"{DateTimeOffset.Now:O} [WARN] AppLog: dropped {dropped} log line(s) while the queue was full.");
+                if (batch.Count == 0) return;
+                Directory.CreateDirectory(Path.GetDirectoryName(LogFile)!);
+                if (File.Exists(LogFile) && new FileInfo(LogFile).Length >= MaxLogBytes)
+                    File.Move(LogFile, LogFile + ".previous", overwrite: true);
                 File.AppendAllText(LogFile, string.Join(Environment.NewLine, batch) + Environment.NewLine);
             }
         }
