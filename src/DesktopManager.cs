@@ -2111,11 +2111,17 @@ internal sealed class DesktopManager
 
     private void ExpireMinimizeMarkers(long now)
     {
-        foreach (IntPtr h in _internalMinimizeUntil
-                     .Where(pair => now > pair.Value)
-                     .Select(pair => pair.Key)
-                     .ToList())
-            _internalMinimizeUntil.Remove(h);
+        // Runs on every foreground change: keep it allocation-free in the common case.
+        if (_internalMinimizeUntil.Count > 0)
+        {
+            List<IntPtr>? expired = null;
+            foreach (var pair in _internalMinimizeUntil)
+                if (now > pair.Value)
+                    (expired ??= new List<IntPtr>()).Add(pair.Key);
+            if (expired != null)
+                foreach (IntPtr h in expired)
+                    _internalMinimizeUntil.Remove(h);
+        }
         if (now > _suppressParkedForegroundUntil)
         {
             _minimizeSource = IntPtr.Zero;
@@ -2145,6 +2151,9 @@ internal sealed class DesktopManager
     public void HandleForegroundActivated(IntPtr h)
     {
         if (_switchInProgress) return;
+        // Mode-independent: MarkInternalMinimize is written in both modes (the iconic
+        // restore chain), so the markers must also expire in both modes.
+        ExpireMinimizeMarkers(Environment.TickCount64);
         if (SharedTaskbar)
         {
             HandleParkedForegroundActivated(h);
@@ -2158,7 +2167,6 @@ internal sealed class DesktopManager
     private void HandleParkedForegroundActivated(IntPtr h)
     {
         long now = Environment.TickCount64;
-        ExpireMinimizeMarkers(now);
         if (h == IntPtr.Zero || !_hidden.TryGetValue(h, out var record) || !record.Parked) return;
         if (!MatchesWindowIdentity(h, record))
         {
