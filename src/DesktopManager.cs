@@ -504,8 +504,20 @@ internal sealed class DesktopManager
     }
 
     /// <summary>One hide attempt: SW_HIDE followed by the visibility + identity verification.</summary>
+    /// <summary>
+    /// Whether it is safe to send a window synchronous messages right now. ShowWindow,
+    /// SetWindowPos and SetForegroundWindow deliver their effects through the target
+    /// window's thread; calling one on a hung window blocks this UI thread indefinitely
+    /// and freezes all desktop management until that app recovers (observed in the wild
+    /// with an unresponsive WinUI Notepad). A hung window is treated as a transient
+    /// refusal so the batched retries and rollback paths resolve it in bounded time.
+    /// </summary>
+    private static bool SafeToModifyWindow(IntPtr h) =>
+        Native.IsWindow(h) && !Native.IsHungAppWindow(h);
+
     private bool TryHideOnce((IntPtr Handle, HiddenWindowRecord Record) candidate)
     {
+        if (!SafeToModifyWindow(candidate.Handle)) return false;
         Native.ShowWindow(candidate.Handle, Native.SW_HIDE);
         return !Native.IsWindowVisible(candidate.Handle) &&
                MatchesWindowIdentity(candidate.Handle, candidate.Record);
@@ -526,7 +538,7 @@ internal sealed class DesktopManager
             RemoveHiddenRecord(candidate.Handle);
             touched.Remove(candidate.Handle);
             // Hidden but the handle was reused: bring the replacement back on screen.
-            if (!Native.IsWindowVisible(candidate.Handle))
+            if (!Native.IsWindowVisible(candidate.Handle) && SafeToModifyWindow(candidate.Handle))
                 Native.ShowWindow(candidate.Handle, Native.SW_SHOWNA);
             return true;
         }
@@ -550,7 +562,7 @@ internal sealed class DesktopManager
                 // This was already a journaled off-screen window before the mode
                 // conversion attempt. Restore only its visibility and retain the
                 // original recovery geometry.
-                if (!Native.IsWindowVisible(h))
+                if (!Native.IsWindowVisible(h) && SafeToModifyWindow(h))
                     Native.ShowWindow(h, Native.SW_SHOWNA);
                 SetHiddenRecord(h, previous);
                 success &= Native.IsWindowVisible(h);
@@ -671,6 +683,7 @@ internal sealed class DesktopManager
     private bool ShowManagedWindow(IntPtr h)
     {
         if (!_hidden.TryGetValue(h, out var record)) return false;
+        if (!SafeToModifyWindow(h)) return false;
         if (!MatchesWindowIdentity(h, record))
         {
             RemoveHiddenRecord(h);
@@ -972,6 +985,13 @@ internal sealed class DesktopManager
     {
         if (!Native.IsWindow(c.Handle)) return (ParkOutcome.Destroyed, null);
         if (!MatchesWindowIdentity(c.Handle, c.Record)) return (ParkOutcome.IdentityMismatch, null);
+        // Never send window messages to a hung app: the call would block the UI thread
+        // until it recovers. Report it as a failed attempt with a full diagnostic so
+        // the retry rounds and the rollback log have something to describe.
+        if (Native.IsHungAppWindow(c.Handle))
+            return (ParkOutcome.Failed,
+                new ParkAttemptDiag(false, null, true, Native.IsWindowVisible(c.Handle),
+                    Native.IsIconic(c.Handle), Native.IsZoomed(c.Handle), null, null, null));
 
         bool applied;
         int? win32Error = null;
@@ -1367,6 +1387,7 @@ internal sealed class DesktopManager
     {
         if (!_hidden.TryGetValue(h, out var record)) return false;
         if (!record.Parked) return ShowManagedWindow(h);
+        if (!SafeToModifyWindow(h)) return false;
         if (!MatchesWindowIdentity(h, record))
         {
             RemoveHiddenRecord(h);
@@ -2078,7 +2099,7 @@ internal sealed class DesktopManager
             !st.Desktops[target].Contains(focus))
             focus = st.Desktops[target].FirstOrDefault(h =>
                 Native.IsWindow(h) && Native.IsWindowVisible(h) && !Native.IsIconic(h));
-        if (focus != IntPtr.Zero)
+        if (focus != IntPtr.Zero && !Native.IsHungAppWindow(focus))
             Native.SetForegroundWindow(focus);
 
         // In shared mode never leave the foreground on an off-screen window (fallback for when SetForegroundWindow fails).
@@ -2107,6 +2128,7 @@ internal sealed class DesktopManager
     private TargetRestoreOutcome TryRestoreTargetWindow(IntPtr h,
         HashSet<IntPtr> targetInitiallyManaged, List<IntPtr> targetSuccessfullyRestored)
     {
+        if (!SafeToModifyWindow(h)) return TargetRestoreOutcome.Failed;
         if (ShowOrUnparkManagedWindow(h))
         {
             if (targetInitiallyManaged.Contains(h))
@@ -2356,7 +2378,7 @@ internal sealed class DesktopManager
     /// </summary>
     private static void RestoreAndFocusWindow(IntPtr h)
     {
-        if (!Native.IsWindow(h) || !Native.IsWindowVisible(h)) return;
+        if (!Native.IsWindow(h) || !Native.IsWindowVisible(h) || Native.IsHungAppWindow(h)) return;
         if (Native.IsIconic(h))
             Native.ShowWindow(h, Native.SW_RESTORE);
         Native.SetForegroundWindow(h);
@@ -2746,6 +2768,7 @@ internal sealed class DesktopManager
     /// For a parked window: map the saved rectangle by DPI and transfer it to the target display's parking area.</summary>
     private bool RepositionWindow(IntPtr h, string srcDevice, string dstDevice)
     {
+        if (!SafeToModifyWindow(h)) return false;
         HiddenWindowRecord? hiddenRecord = null;
         if (_hidden.TryGetValue(h, out var rec))
         {

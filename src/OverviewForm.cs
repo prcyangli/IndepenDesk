@@ -756,9 +756,12 @@ internal sealed class OverviewForm : Form
         {
             _mgr.SwitchTo(sourceDevice, sourceLocal);
             Close();
-            if (Native.IsWindow(win.Handle) && !Native.IsWindowVisible(win.Handle))
-                Native.ShowWindow(win.Handle, Native.SW_SHOWNA);
-            Native.SetForegroundWindow(win.Handle);
+            if (Native.IsWindow(win.Handle) && !Native.IsHungAppWindow(win.Handle))
+            {
+                if (!Native.IsWindowVisible(win.Handle))
+                    Native.ShowWindow(win.Handle, Native.SW_SHOWNA);
+                Native.SetForegroundWindow(win.Handle);
+            }
         });
         try
         {
