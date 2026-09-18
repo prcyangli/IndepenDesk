@@ -2398,6 +2398,16 @@ internal sealed class DesktopManager
         }
     }
 
+    /// <summary>All windows of every non-current desktop on every monitor. Mode changes
+    /// operate on the whole union in one batch so the retry backoff is paid once per
+    /// switch instead of once per desktop (N desktops used to mean N × ~600 ms).</summary>
+    private List<IntPtr> CollectNonCurrentDesktopWindows() =>
+        _monitors.Values
+            .SelectMany(st => st.Desktops
+                .Where((_, i) => i != st.Current)
+                .SelectMany(set => set))
+            .ToList();
+
     private bool SetSharedTaskbarModeCore(bool enable)
     {
         Sync();
@@ -2426,26 +2436,16 @@ internal sealed class DesktopManager
                 return false;
             }
 
-            bool failed = false;
-            foreach (var st in _monitors.Values)
-            {
-                for (int i = 0; i < st.Desktops.Count; i++)
-                    if (i != st.Current && st.Desktops[i].Count > 0 && !ParkManagedWindows(st.Desktops[i]))
-                    {
-                        failed = true;
-                        break;
-                    }
-                if (failed) break;
-            }
+            var toPark = CollectNonCurrentDesktopWindows();
+            bool failed = toPark.Count > 0 && !ParkManagedWindows(toPark);
 
             if (failed)
             {
                 foreach (var h in _hidden.Where(kv => kv.Value.Parked).Select(kv => kv.Key).ToList())
                     UnparkManagedWindow(h);
-                foreach (var m in _monitors.Values)
-                    for (int i = 0; i < m.Desktops.Count; i++)
-                        if (i != m.Current)
-                            HideManagedWindows(m.Desktops[i]);
+                var toHide = CollectNonCurrentDesktopWindows();
+                if (toHide.Count > 0)
+                    HideManagedWindows(toHide);
                 PersistHidden();
                 RaiseWindowControlWarning(nameof(SetSharedTaskbarMode),
                     "Cannot switch to shared taskbar mode: parking other desktops failed; previous mode restored");
@@ -2479,20 +2479,16 @@ internal sealed class DesktopManager
                 return false;
             }
 
-            bool failed = false;
-            foreach (var st in _monitors.Values)
-                for (int i = 0; i < st.Desktops.Count; i++)
-                    if (i != st.Current && st.Desktops[i].Count > 0 && !HideManagedWindows(st.Desktops[i]))
-                        failed = true;
+            var toHide = CollectNonCurrentDesktopWindows();
+            bool failed = toHide.Count > 0 && !HideManagedWindows(toHide);
 
             if (failed)
             {
                 foreach (var h in _hidden.Where(kv => !kv.Value.Parked).Select(kv => kv.Key).ToList())
                     ShowManagedWindow(h);
-                foreach (var st in _monitors.Values)
-                    for (int i = 0; i < st.Desktops.Count; i++)
-                        if (i != st.Current && st.Desktops[i].Count > 0)
-                            ParkManagedWindows(st.Desktops[i]);
+                var toPark = CollectNonCurrentDesktopWindows();
+                if (toPark.Count > 0)
+                    ParkManagedWindows(toPark);
                 PersistHidden();
                 RaiseWindowControlWarning(nameof(SetSharedTaskbarMode),
                     "Cannot leave shared taskbar mode: hiding other desktops failed; previous mode restored");
