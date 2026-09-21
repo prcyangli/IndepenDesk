@@ -20,6 +20,12 @@ internal static class Native
     public const uint MONITOR_DEFAULTTONEAREST = 2;
 
     public const int WM_HOTKEY = 0x0312;
+    public const int WM_DISPLAYCHANGE = 0x007E;
+    public const int WM_POWERBROADCAST = 0x0218;
+    public const int PBT_APMSUSPEND = 0x0004;
+    public const int PBT_APMRESUMECRITICAL = 0x0006;
+    public const int PBT_APMRESUMESUSPEND = 0x0007;
+    public const int PBT_APMRESUMEAUTOMATIC = 0x0012;
     public const uint MOD_ALT = 0x0001;
     public const uint MOD_CONTROL = 0x0002;
     public const uint MOD_SHIFT = 0x0004;

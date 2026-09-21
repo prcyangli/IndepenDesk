@@ -227,7 +227,7 @@ internal sealed class OverviewForm : Form
             row.DragEnter += (_, e) =>
             {
                 if (e.Data?.GetData(typeof(DesktopDrag)) is DesktopDrag d &&
-                    (d.Device == mon.Device || mon.Desktops.Count < DesktopManager.MaxDesktopsPerMonitor))
+                    (d.Device == mon.Device || mon.CanCreateDesktop))
                 {
                     e.Effect = DragDropEffects.Move;
                     rowHover = true;
@@ -247,7 +247,7 @@ internal sealed class OverviewForm : Form
             foreach (var desk in mon.Desktops)
                 flow.Controls.Add(BuildDesktopCard(mon, desk));
 
-            if (mon.Desktops.Count < DesktopManager.MaxDesktopsPerMonitor)
+            if (mon.CanCreateDesktop)
                 flow.Controls.Add(BuildAddCard(mon.Device));
 
             int flowWidth = row.ClientSize.Width - ScalePx(8);
@@ -517,7 +517,7 @@ internal sealed class OverviewForm : Form
                 card.Invalidate();
             }
             else if (e.Data?.GetData(typeof(DesktopDrag)) is DesktopDrag d &&
-                     (d.Device == mon.Device || mon.Desktops.Count < DesktopManager.MaxDesktopsPerMonitor))
+                     (d.Device == mon.Device || mon.CanCreateDesktop))
             {
                 e.Effect = DragDropEffects.Move;
                 dropHover = true;
@@ -741,7 +741,7 @@ internal sealed class OverviewForm : Form
             }
             // Mirror of dropping a window onto the "+" card: same manager method,
             // same "create at the end without switching" behavior; hidden when full.
-            if (mon.Desktops.Count < DesktopManager.MaxDesktopsPerMonitor)
+            if (mon.CanCreateDesktop)
             {
                 string newDesktopDevice = mon.Device;
                 menu.Items.Add(L.F("ov.menu.moveNew", mon.Ordinal), null, (_, _) =>

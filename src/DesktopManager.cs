@@ -10,7 +10,8 @@ internal sealed record SwitchInfo(string Device, int LocalIndex);
 
 internal sealed record WindowEntry(IntPtr Handle, string Title);
 internal sealed record DesktopEntry(int LocalIndex, bool IsCurrent, IReadOnlyList<WindowEntry> Windows);
-internal sealed record MonitorEntry(string Device, int Ordinal, IReadOnlyList<DesktopEntry> Desktops);
+internal sealed record MonitorEntry(string Device, int Ordinal, bool CanCreateDesktop,
+    IReadOnlyList<DesktopEntry> Desktops);
 
 /// <summary>A skipped unmanageable window (handle, process name, title, reason), for display by the notification layer.</summary>
 internal sealed record UnmanageableWindowInfo(IntPtr Handle, string ProcessName, string Title, string Reason);
@@ -29,9 +30,44 @@ internal sealed class DesktopManager
     private sealed class MonitorState
     {
         public required string Device;
-        public List<HashSet<IntPtr>> Desktops = new() { new HashSet<IntPtr>() };
-        public List<IntPtr> LastActive = new() { IntPtr.Zero };
+        public required string StableId;
+        public List<DesktopState> Desktops = new();
         public int Current;
+        public DisplaySnapshot? LastDisplay;
+    }
+
+    /// <summary>
+    /// A desktop has its own runtime identity.  HomeStableId is its durable owner for
+    /// the lifetime of this process; HostStableId is the display currently presenting
+    /// it.  The two differ while a sleeping laptop is resumed without one of the
+    /// displays that was present at suspend time.
+    /// </summary>
+    private sealed class DesktopState
+    {
+        public readonly Guid RuntimeId = Guid.NewGuid();
+        public readonly HashSet<IntPtr> Windows = new();
+        public IntPtr LastActive;
+        public required string HomeStableId;
+        public required string HostStableId;
+        public bool ReturnWhenOnline;
+        public int OriginalOrder;
+    }
+
+    private sealed record WindowTransitSnapshot(
+        HiddenWindowRecord Identity,
+        Rectangle NormalRect,
+        DisplaySnapshot NormalRectDisplay,
+        uint ShowCmd,
+        Rectangle? BorrowedBaseline = null,
+        DisplaySnapshot? BorrowedDisplay = null);
+
+    private sealed class BorrowedDisplayState
+    {
+        public required DisplaySnapshot HomeDisplay;
+        public required List<Guid> OriginalOrder;
+        public required Guid PreferredCurrent;
+        public required string HostStableId;
+        public required Guid HostPreviousCurrent;
     }
 
     private sealed record HiddenWindowRecord(
@@ -84,7 +120,13 @@ internal sealed class DesktopManager
 
     private readonly Dictionary<string, MonitorState> _monitors = new();
     private readonly Dictionary<IntPtr, HiddenWindowRecord> _hidden = new();
-    private readonly HashSet<HashSet<IntPtr>> _retainedEmptyDesktops = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<DesktopState> _retainedEmptyDesktops = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<string, BorrowedDisplayState> _borrowedDisplays = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<IntPtr, WindowTransitSnapshot> _sleepWindowSnapshots = new();
+    private Dictionary<string, DisplaySnapshot> _displayTopology = new(StringComparer.OrdinalIgnoreCase);
+    private bool _topologyTransitionInProgress;
+    private bool _hasSuspendSnapshot;
+    private bool _borrowedSinceSuspend;
     private readonly uint _ownPid = (uint)Environment.ProcessId;
     private readonly int _sessionId = GetCurrentSessionId();
     private readonly string _stateFile;
@@ -1179,52 +1221,6 @@ internal sealed class DesktopManager
                IsWindowPhysicallyAssignedToDisplay(h, target.DeviceName);
     }
 
-    /// <summary>Bring a visible, unjournaled window back after its display disappears.</summary>
-    private bool RestoreUnjournaledOffScreenWindow(IntPtr h)
-    {
-        if (!IsWindowOffScreen(h)) return true;
-
-        var placement = new Native.WINDOWPLACEMENT
-        {
-            length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>()
-        };
-        bool hasPlacement = Native.GetWindowPlacement(h, ref placement);
-        Rectangle saved;
-        if (hasPlacement)
-            saved = FromRECT(placement.rcNormalPosition);
-        else if (Native.GetWindowRect(h, out var rect))
-            saved = FromRECT(rect);
-        else
-            return false;
-
-        if (saved.Width <= 0 || saved.Height <= 0) return false;
-        Screen? host = NearestScreen(saved) ?? Screen.PrimaryScreen;
-        if (host == null) return false;
-        Rectangle area = host.WorkingArea;
-        saved.Size = new Size(Math.Min(saved.Width, area.Width), Math.Min(saved.Height, area.Height));
-        saved.Location = new Point(area.Left + (area.Width - saved.Width) / 2,
-            area.Top + (area.Height - saved.Height) / 2);
-
-        if (Native.IsIconic(h))
-        {
-            // Since 25H2 SetWindowPlacement ignores rcNormalPosition; use the show -> place -> re-minimize chain.
-            return RestoreIconicPlacement(h, saved);
-        }
-
-        if (Native.IsZoomed(h) && hasPlacement)
-        {
-            if (!Native.SetWindowPos(h, IntPtr.Zero, area.X, area.Y, area.Width, area.Height,
-                    Native.SWP_NOZORDER | Native.SWP_NOACTIVATE))
-                return false;
-            placement.showCmd = Native.SW_SHOWMAXIMIZED;
-            placement.rcNormalPosition = ToRECT(saved);
-            return Native.SetWindowPlacement(h, ref placement) && !IsWindowOffScreen(h);
-        }
-
-        return Native.SetWindowPos(h, IntPtr.Zero, saved.X, saved.Y, saved.Width, saved.Height,
-                   Native.SWP_NOZORDER | Native.SWP_NOACTIVATE) && !IsWindowOffScreen(h);
-    }
-
     /// <summary>
     /// Move a minimized window's restore position back on-screen (keeping it minimized). Since
     /// Windows 11 25H2 (build 26200) SetWindowPlacement ignores rcNormalPosition (reproduced even
@@ -1599,15 +1595,24 @@ internal sealed class DesktopManager
 
     // ---------- yapı yönetimi ----------
 
-    private static void AddDesktop(MonitorState st)
+    private static DesktopState AddDesktop(MonitorState st)
     {
-        st.Desktops.Add(new HashSet<IntPtr>());
-        st.LastActive.Add(IntPtr.Zero);
+        var desktop = new DesktopState
+        {
+            HomeStableId = st.StableId,
+            HostStableId = st.StableId,
+            OriginalOrder = st.Desktops.Count
+        };
+        st.Desktops.Add(desktop);
+        return desktop;
     }
 
-    private bool AddWindow(HashSet<IntPtr> desktop, IntPtr h)
+    private static int OwnedDesktopCount(MonitorState st) => st.Desktops.Count(d =>
+        string.Equals(d.HomeStableId, st.StableId, StringComparison.OrdinalIgnoreCase));
+
+    private bool AddWindow(DesktopState desktop, IntPtr h)
     {
-        if (!desktop.Add(h)) return false;
+        if (!desktop.Windows.Add(h)) return false;
         _retainedEmptyDesktops.Remove(desktop);
         return true;
     }
@@ -1617,11 +1622,10 @@ internal sealed class DesktopManager
     {
         bool changed = false;
         while (st.Desktops.Count - 1 > st.Current &&
-               st.Desktops[^1].Count == 0 &&
+               st.Desktops[^1].Windows.Count == 0 &&
                !_retainedEmptyDesktops.Contains(st.Desktops[^1]))
         {
             st.Desktops.RemoveAt(st.Desktops.Count - 1);
-            st.LastActive.RemoveAt(st.LastActive.Count - 1);
             changed = true;
         }
         return changed;
@@ -1667,58 +1671,597 @@ internal sealed class DesktopManager
             _processIdentityCache.Clear();
     }
 
-    private bool SyncCore()
+    /// <summary>Freeze ordinary reconciliation and take a bounded in-memory snapshot before suspend.</summary>
+    public void PrepareForSuspend()
+    {
+        bool transitionAlreadyArmed = _topologyTransitionInProgress;
+        if (!transitionAlreadyArmed)
+        {
+            Sync();
+            _topologyTransitionInProgress = true;
+        }
+        _hasSuspendSnapshot = true;
+        _borrowedSinceSuspend = _borrowedDisplays.Count > 0;
+        if (!transitionAlreadyArmed || _sleepWindowSnapshots.Count == 0)
+            CaptureWindowTransitSnapshots();
+        AppLog.Info(nameof(PrepareForSuspend),
+            $"Suspend snapshot captured: {_monitors.Count} display(s), {_sleepWindowSnapshots.Count} window(s).");
+    }
+
+    /// <summary>Keep periodic Sync from seeing a transient one-display resume topology.</summary>
+    public void BeginResume()
+    {
+        _topologyTransitionInProgress = true;
+        AppLog.Info(nameof(BeginResume), "Resume topology stabilization started.");
+    }
+
+    /// <summary>Display-change messages use the same reversible in-memory topology transaction.</summary>
+    public void BeginDisplayTopologyChange()
+    {
+        if (_topologyTransitionInProgress) return;
+        CaptureWindowTransitSnapshots();
+        _topologyTransitionInProgress = true;
+    }
+
+    /// <summary>Apply a stable topology sample, then resume normal window reconciliation.</summary>
+    public void CompleteDisplayTopologyChange()
+    {
+        BeginIdentityCache();
+        try
+        {
+            ReconcileDisplayTopology(DisplayTopology.Capture());
+        }
+        finally
+        {
+            EndIdentityCache();
+            _topologyTransitionInProgress = false;
+        }
+
+        Sync();
+        AppLog.Info(nameof(CompleteDisplayTopologyChange),
+            $"Topology stabilization completed; {_monitors.Count} display(s) online, " +
+            $"{_borrowedDisplays.Count} borrowed display group(s).");
+    }
+
+    public bool TopologyTransitionInProgress => _topologyTransitionInProgress;
+
+    public void CancelDisplayTopologyChange()
+    {
+        _topologyTransitionInProgress = false;
+        AppLog.Warning(nameof(CancelDisplayTopologyChange),
+            "Topology stabilization was cancelled after an unexpected error; periodic sync resumed.");
+    }
+
+    private void CaptureWindowTransitSnapshots()
+    {
+        if (_borrowedDisplays.Count == 0)
+            _sleepWindowSnapshots.Clear();
+
+        BeginIdentityCache();
+        try
+        {
+            foreach (MonitorState monitor in _monitors.Values)
+            {
+                DisplaySnapshot? placementDisplay = monitor.LastDisplay;
+                if (_displayTopology.TryGetValue(monitor.Device, out DisplaySnapshot? display))
+                    placementDisplay = monitor.LastDisplay = display;
+                if (placementDisplay == null) continue;
+
+                foreach (DesktopState desktop in monitor.Desktops)
+                {
+                    foreach (IntPtr h in desktop.Windows.Where(Native.IsWindow))
+                    {
+                        // Preserve the first pre-borrow placement so a later display
+                        // return can restore it exactly instead of round-tripping DPI.
+                        if (_sleepWindowSnapshots.TryGetValue(h, out WindowTransitSnapshot? prior))
+                        {
+                            if (MatchesWindowIdentity(h, prior.Identity)) continue;
+                            _sleepWindowSnapshots.Remove(h);
+                        }
+                        HiddenWindowRecord identity;
+                        if (_hidden.TryGetValue(h, out HiddenWindowRecord? hidden) &&
+                            MatchesWindowIdentity(h, hidden))
+                            identity = hidden;
+                        else if (!TryCaptureWindowIdentity(h, out identity))
+                            continue;
+
+                        Rectangle normal = Rectangle.FromLTRB(identity.NormalLeft, identity.NormalTop,
+                            identity.NormalRight, identity.NormalBottom);
+                        if (normal.Width <= 0 || normal.Height <= 0) continue;
+                        _sleepWindowSnapshots[h] = new WindowTransitSnapshot(
+                            identity, normal, placementDisplay,
+                            unchecked((uint)identity.SavedShowCmd));
+                    }
+                }
+            }
+        }
+        finally
+        {
+            EndIdentityCache();
+        }
+    }
+
+    private bool ReconcileDisplayTopology(Dictionary<string, DisplaySnapshot> current)
     {
         bool changed = false;
-        foreach (var h in _unmanageable.Keys.Where(h => !Native.IsWindow(h)).ToList())
-            _unmanageable.Remove(h);
-        var currentDevices = Screen.AllScreens.Select(s => s.DeviceName).ToHashSet();
 
-        foreach (string dev in currentDevices)
-            if (!_monitors.ContainsKey(dev))
-            {
-                _monitors[dev] = new MonitorState { Device = dev };
-                changed = true;
-            }
-
-        foreach (string dev in _monitors.Keys.Where(d => !currentDevices.Contains(d)).ToList())
+        // A physical display can return under a different \\.\DISPLAYx name, and
+        // two displays can even swap those names. Rebuild the routing dictionary by
+        // stable identity in one pass; applying old->new names one at a time would
+        // overwrite one state (and one set of recovery records) during a swap.
+        List<MonitorState> previousStates = _monitors.Values.Distinct().ToList();
+        var matchedStates = new HashSet<MonitorState>(ReferenceEqualityComparer.Instance);
+        var monitorNameChanges = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        _monitors.Clear();
+        foreach (DisplaySnapshot display in current.Values)
         {
-            MonitorState removedMonitor = _monitors[dev];
-            MonitorState? fallback = _monitors.Values
-                .FirstOrDefault(m => currentDevices.Contains(m.Device));
-            var displacedWindows = new HashSet<IntPtr>();
-            foreach (var set in removedMonitor.Desktops)
+            MonitorState? existing = previousStates.FirstOrDefault(m =>
+                string.Equals(m.StableId, display.StableId, StringComparison.OrdinalIgnoreCase));
+            if (existing == null) continue;
+            matchedStates.Add(existing);
+            string oldDevice = existing.Device;
+            existing.Device = display.DeviceName;
+            existing.LastDisplay = display;
+            _monitors[display.DeviceName] = existing;
+            if (!string.Equals(oldDevice, display.DeviceName, StringComparison.OrdinalIgnoreCase))
             {
-                _retainedEmptyDesktops.Remove(set);
-                foreach (var h in set)
-                    displacedWindows.Add(h);
+                monitorNameChanges[oldDevice] = display.DeviceName;
+                changed = true;
+                AppLog.Info(nameof(ReconcileDisplayTopology),
+                    $"Display '{existing.StableId}' rebound: '{oldDevice}' -> '{display.DeviceName}'.");
             }
-            _monitors.Remove(dev);
-            foreach (IntPtr h in displacedWindows)
+        }
+
+        foreach (MonitorState unmatched in previousStates.Where(m => !matchedStates.Contains(m)))
+        {
+            string key = unmatched.Device;
+            if (_monitors.ContainsKey(key))
+                key = $"<offline:{unmatched.StableId}>";
+            _monitors[key] = unmatched;
+        }
+        RewriteHiddenMonitorNames(monitorNameChanges);
+
+        foreach (DisplaySnapshot display in current.Values)
+        {
+            if (_monitors.TryGetValue(display.DeviceName, out MonitorState? existing))
             {
-                if (!Native.IsWindow(h))
-                {
-                    RemoveHiddenRecord(h);
-                    continue;
-                }
-
-                bool restored = ShowOrUnparkManagedWindow(h);
-                if (!restored && !_hidden.ContainsKey(h) && Native.IsWindowVisible(h))
-                    restored = RestoreUnjournaledOffScreenWindow(h);
-                if (!restored)
-                    AppLog.Warning(nameof(Sync),
-                        $"Could not restore HWND={h} after display '{dev}' was disconnected.");
-
-                if (fallback != null &&
-                    (Native.IsWindowVisible(h) || _hidden.ContainsKey(h)))
-                    AddWindow(fallback.Desktops[fallback.Current], h);
+                existing.LastDisplay = display;
+                continue;
             }
+
+            var state = new MonitorState
+            {
+                Device = display.DeviceName,
+                StableId = display.StableId,
+                LastDisplay = display
+            };
+            if (!_borrowedDisplays.ContainsKey(display.StableId))
+                AddDesktop(state);
+            _monitors[display.DeviceName] = state;
             changed = true;
         }
 
+        // Return groups first. This matters when one display comes back while the
+        // display temporarily hosting its desktops disappears in the same sample.
+        foreach (string homeId in _borrowedDisplays.Keys.ToList())
+        {
+            DisplaySnapshot? returned = current.Values.FirstOrDefault(d =>
+                string.Equals(d.StableId, homeId, StringComparison.OrdinalIgnoreCase));
+            if (returned != null)
+                changed |= ReturnBorrowedDisplay(homeId, returned);
+        }
+
+        var currentStableIds = current.Values.Select(d => d.StableId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (MonitorState missing in _monitors.Values
+                     .Where(m => !currentStableIds.Contains(m.StableId)).ToList())
+        {
+            MonitorState? fallback = ChooseFallbackMonitor(current);
+            if (fallback == null)
+            {
+                AppLog.Warning(nameof(ReconcileDisplayTopology),
+                    $"Display '{missing.Device}' disappeared but no online fallback exists; retaining its state.");
+                continue;
+            }
+            changed |= BorrowMissingDisplay(missing, fallback, current[fallback.Device]);
+        }
+
+        foreach (MonitorState monitor in _monitors.Values)
+        {
+            DisplaySnapshot? display = current.Values.FirstOrDefault(d =>
+                string.Equals(d.StableId, monitor.StableId, StringComparison.OrdinalIgnoreCase));
+            if (display != null)
+                monitor.LastDisplay = display;
+        }
+
+        if (_borrowedDisplays.Count == 0)
+        {
+            if (_hasSuspendSnapshot && !_borrowedSinceSuspend)
+                RestoreOnlineSuspendPlacements(current);
+            _sleepWindowSnapshots.Clear();
+            _hasSuspendSnapshot = false;
+            _borrowedSinceSuspend = false;
+        }
+        _displayTopology = current;
+        return changed;
+    }
+
+    private void RestoreOnlineSuspendPlacements(
+        IReadOnlyDictionary<string, DisplaySnapshot> current)
+    {
+        var displaysByStableId = current.Values.ToDictionary(d => d.StableId,
+            StringComparer.OrdinalIgnoreCase);
+        foreach (MonitorState monitor in _monitors.Values)
+        {
+            if (!displaysByStableId.TryGetValue(monitor.StableId,
+                    out DisplaySnapshot? destination))
+                continue;
+            foreach (DesktopState desktop in monitor.Desktops)
+            {
+                if (!string.Equals(desktop.HomeStableId, desktop.HostStableId,
+                        StringComparison.OrdinalIgnoreCase))
+                    continue;
+                foreach (IntPtr h in desktop.Windows.Where(Native.IsWindow))
+                {
+                    if (!_sleepWindowSnapshots.TryGetValue(h, out WindowTransitSnapshot? transit) ||
+                        !MatchesWindowIdentity(h, transit.Identity))
+                        continue;
+                    Rectangle target = MapWindowRect(transit.NormalRect,
+                        transit.NormalRectDisplay, destination);
+                    if (_hidden.TryGetValue(h, out HiddenWindowRecord? record) &&
+                        MatchesWindowIdentity(h, record))
+                    {
+                        SetHiddenRecord(h, record with
+                        {
+                            NormalLeft = target.Left,
+                            NormalTop = target.Top,
+                            NormalRight = target.Right,
+                            NormalBottom = target.Bottom,
+                            ParkMonitor = destination.DeviceName
+                        });
+                    }
+                    else if (Native.IsWindowVisible(h))
+                    {
+                        ApplyTopologyPlacement(h, target, transit.ShowCmd, destination);
+                    }
+                }
+            }
+        }
+        PersistHidden();
+    }
+
+    private MonitorState? ChooseFallbackMonitor(IReadOnlyDictionary<string, DisplaySnapshot> current)
+    {
+        var displaysByStableId = current.Values.ToDictionary(d => d.StableId,
+            StringComparer.OrdinalIgnoreCase);
+        IEnumerable<MonitorState> online = _monitors.Values
+            .Where(m => displaysByStableId.ContainsKey(m.StableId));
+        return online.FirstOrDefault(m => displaysByStableId[m.StableId].IsInternal)
+            ?? online.FirstOrDefault(m => displaysByStableId[m.StableId].IsPrimary)
+            ?? online.FirstOrDefault();
+    }
+
+    private bool BorrowMissingDisplay(MonitorState source, MonitorState fallback,
+        DisplaySnapshot fallbackDisplay)
+    {
+        if (ReferenceEquals(source, fallback)) return false;
+        if (_hasSuspendSnapshot)
+            _borrowedSinceSuspend = true;
+        DisplaySnapshot sourceDisplay = source.LastDisplay ?? new DisplaySnapshot(
+            source.StableId, source.Device, Rectangle.Empty, Rectangle.Empty, 96, false, false);
+        DesktopState? sourceCurrent = source.Desktops.Count > 0
+            ? source.Desktops[Math.Clamp(source.Current, 0, source.Desktops.Count - 1)]
+            : null;
+        DesktopState hostCurrent = fallback.Desktops[fallback.Current];
+        List<DesktopState> nativeDesktops = source.Desktops
+            .Where(d => string.Equals(d.HomeStableId, source.StableId,
+                StringComparison.OrdinalIgnoreCase)).ToList();
+
+        if (nativeDesktops.Count > 0 && !_borrowedDisplays.ContainsKey(source.StableId))
+        {
+            DesktopState preferred = sourceCurrent != null && nativeDesktops.Contains(sourceCurrent)
+                ? sourceCurrent
+                : nativeDesktops[0];
+            _borrowedDisplays[source.StableId] = new BorrowedDisplayState
+            {
+                HomeDisplay = sourceDisplay,
+                OriginalOrder = nativeDesktops.Select(d => d.RuntimeId).ToList(),
+                PreferredCurrent = preferred.RuntimeId,
+                HostStableId = fallback.StableId,
+                HostPreviousCurrent = hostCurrent.RuntimeId
+            };
+        }
+
+        for (int i = 0; i < source.Desktops.Count; i++)
+        {
+            DesktopState desktop = source.Desktops[i];
+            desktop.OriginalOrder = i;
+            desktop.HostStableId = fallback.StableId;
+            if (string.Equals(desktop.HomeStableId, source.StableId,
+                    StringComparison.OrdinalIgnoreCase))
+                desktop.ReturnWhenOnline = true;
+            if (_borrowedDisplays.TryGetValue(desktop.HomeStableId, out BorrowedDisplayState? group))
+                group.HostStableId = fallback.StableId;
+            fallback.Desktops.Add(desktop);
+            _retainedEmptyDesktops.Add(desktop);
+            PrepareDesktopForBorrow(desktop, sourceDisplay, fallbackDisplay);
+        }
+
+        fallback.Current = fallback.Desktops.IndexOf(hostCurrent);
+        string? sourceKey = _monitors.FirstOrDefault(kv => ReferenceEquals(kv.Value, source)).Key;
+        if (sourceKey != null)
+            _monitors.Remove(sourceKey);
+        AppLog.Info(nameof(BorrowMissingDisplay),
+            $"Display '{source.Device}' went offline; moved {source.Desktops.Count} desktop(s) " +
+            $"as separate units to '{fallback.Device}'.");
+        return true;
+    }
+
+    private void PrepareDesktopForBorrow(DesktopState desktop, DisplaySnapshot source,
+        DisplaySnapshot destination)
+    {
+        foreach (IntPtr h in desktop.Windows.Where(Native.IsWindow).ToList())
+        {
+            if (_sleepWindowSnapshots.TryGetValue(h, out WindowTransitSnapshot? transit) &&
+                !MatchesWindowIdentity(h, transit.Identity))
+            {
+                _sleepWindowSnapshots.Remove(h);
+                desktop.Windows.Remove(h);
+                RemoveHiddenRecord(h);
+                continue;
+            }
+            if (transit == null)
+            {
+                if (!TryCaptureWindowIdentity(h, out HiddenWindowRecord identity)) continue;
+                Rectangle captured = Rectangle.FromLTRB(identity.NormalLeft, identity.NormalTop,
+                    identity.NormalRight, identity.NormalBottom);
+                DisplaySnapshot capturedOn = string.Equals(identity.ParkMonitor,
+                        destination.DeviceName, StringComparison.OrdinalIgnoreCase)
+                    ? destination
+                    : source;
+                transit = new WindowTransitSnapshot(identity, captured,
+                    capturedOn, unchecked((uint)identity.SavedShowCmd));
+            }
+
+            Rectangle currentRect = GetRecordedNormalRect(h);
+            Rectangle sourceRect;
+            DisplaySnapshot mappingSource;
+            if (transit.BorrowedBaseline is Rectangle priorBaseline &&
+                transit.BorrowedDisplay != null &&
+                RectApproximatelyEquals(currentRect, priorBaseline))
+            {
+                sourceRect = priorBaseline;
+                mappingSource = transit.BorrowedDisplay;
+            }
+            else if (transit.BorrowedBaseline == null)
+            {
+                sourceRect = transit.NormalRect;
+                mappingSource = transit.NormalRectDisplay;
+            }
+            else
+            {
+                sourceRect = currentRect;
+                mappingSource = source;
+            }
+            Rectangle mapped = MapWindowRect(sourceRect, mappingSource, destination);
+            _sleepWindowSnapshots[h] = transit with
+            {
+                BorrowedBaseline = mapped,
+                BorrowedDisplay = destination
+            };
+            if (Native.IsWindowVisible(h) && !_hidden.ContainsKey(h))
+                ApplyTopologyPlacement(h, mapped, transit.ShowCmd, destination);
+        }
+
+        // Incoming desktops never merge with the fallback's current desktop.
+        // Failures are logged by the existing bounded transaction; membership is
+        // still preserved and the next sync retries instead of adopting the HWND.
+        HideOrParkManagedWindows(desktop.Windows);
+
+        foreach (IntPtr h in desktop.Windows)
+        {
+            if (!_hidden.TryGetValue(h, out HiddenWindowRecord? record) ||
+                !_sleepWindowSnapshots.TryGetValue(h, out WindowTransitSnapshot? transit) ||
+                transit.BorrowedBaseline is not Rectangle mapped ||
+                !MatchesWindowIdentity(h, record))
+                continue;
+            SetHiddenRecord(h, record with
+            {
+                NormalLeft = mapped.Left,
+                NormalTop = mapped.Top,
+                NormalRight = mapped.Right,
+                NormalBottom = mapped.Bottom,
+                ParkMonitor = destination.DeviceName
+            });
+        }
+        PersistHidden();
+    }
+
+    private bool ReturnBorrowedDisplay(string homeId, DisplaySnapshot returnedDisplay)
+    {
+        if (!_borrowedDisplays.TryGetValue(homeId, out BorrowedDisplayState? group)) return false;
+        var located = _monitors.Values
+            .SelectMany(m => m.Desktops.Select(d => (Monitor: m, Desktop: d)))
+            .Where(x => x.Desktop.ReturnWhenOnline &&
+                        string.Equals(x.Desktop.HomeStableId, homeId,
+                            StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (!_monitors.TryGetValue(returnedDisplay.DeviceName, out MonitorState? home))
+        {
+            home = new MonitorState
+            {
+                Device = returnedDisplay.DeviceName,
+                StableId = homeId,
+                LastDisplay = returnedDisplay
+            };
+            _monitors[returnedDisplay.DeviceName] = home;
+        }
+
+        foreach (var hostGroup in located.GroupBy(x => x.Monitor))
+        {
+            MonitorState host = hostGroup.Key;
+            DesktopState? previousCurrent = host.Desktops.Count > 0 ? host.Desktops[host.Current] : null;
+            foreach (var item in hostGroup)
+                HideOrParkManagedWindows(item.Desktop.Windows);
+            foreach (var item in hostGroup)
+                host.Desktops.Remove(item.Desktop);
+
+            if (host.Desktops.Count == 0 && !ReferenceEquals(host, home))
+                AddDesktop(host);
+            if (host.Desktops.Count > 0)
+            {
+                DesktopState? preferredHost = host.Desktops.FirstOrDefault(d =>
+                    d.RuntimeId == group.HostPreviousCurrent);
+                host.Current = preferredHost != null
+                    ? host.Desktops.IndexOf(preferredHost)
+                    : Math.Clamp(previousCurrent != null ? host.Desktops.IndexOf(previousCurrent) : 0,
+                        0, host.Desktops.Count - 1);
+                RestoreManagedWindows(host.Desktops[host.Current].Windows);
+            }
+        }
+
+        List<DesktopState> returned = located.Select(x => x.Desktop)
+            .OrderBy(d => group.OriginalOrder.IndexOf(d.RuntimeId) is int index && index >= 0
+                ? index
+                : int.MaxValue)
+            .ToList();
+        foreach (DesktopState desktop in returned)
+        {
+            desktop.HostStableId = homeId;
+            desktop.ReturnWhenOnline = false;
+            home.Desktops.Add(desktop);
+            PrepareDesktopForReturn(desktop, group, returnedDisplay);
+        }
+
+        if (home.Desktops.Count == 0)
+            AddDesktop(home);
+        DesktopState? preferred = home.Desktops.FirstOrDefault(d => d.RuntimeId == group.PreferredCurrent);
+        home.Current = preferred != null ? home.Desktops.IndexOf(preferred) : 0;
+        RestoreManagedWindows(home.Desktops[home.Current].Windows);
+        _borrowedDisplays.Remove(homeId);
+        PersistHidden();
+        AppLog.Info(nameof(ReturnBorrowedDisplay),
+            $"Display '{returnedDisplay.DeviceName}' returned; restored {returned.Count} desktop(s) as a group.");
+        return true;
+    }
+
+    private void PrepareDesktopForReturn(DesktopState desktop, BorrowedDisplayState group,
+        DisplaySnapshot destination)
+    {
+        DisplaySnapshot source = _displayTopology.Values.FirstOrDefault(d =>
+                string.Equals(d.StableId, group.HostStableId, StringComparison.OrdinalIgnoreCase))
+            ?? group.HomeDisplay;
+        foreach (IntPtr h in desktop.Windows.Where(Native.IsWindow).ToList())
+        {
+            if (_sleepWindowSnapshots.TryGetValue(h, out WindowTransitSnapshot? knownTransit) &&
+                !MatchesWindowIdentity(h, knownTransit.Identity))
+            {
+                _sleepWindowSnapshots.Remove(h);
+                desktop.Windows.Remove(h);
+                RemoveHiddenRecord(h);
+                continue;
+            }
+            Rectangle currentRect = GetRecordedNormalRect(h);
+            Rectangle targetRect;
+            if (_sleepWindowSnapshots.TryGetValue(h, out WindowTransitSnapshot? transit) &&
+                transit.BorrowedBaseline is Rectangle baseline &&
+                RectApproximatelyEquals(currentRect, baseline))
+            {
+                targetRect = MapWindowRect(transit.NormalRect,
+                    transit.NormalRectDisplay, destination);
+            }
+            else
+            {
+                DisplaySnapshot mappingSource = transit?.BorrowedDisplay ?? source;
+                targetRect = MapWindowRect(currentRect, mappingSource, destination);
+            }
+
+            if (_hidden.TryGetValue(h, out HiddenWindowRecord? record) && MatchesWindowIdentity(h, record))
+            {
+                SetHiddenRecord(h, record with
+                {
+                    NormalLeft = targetRect.Left,
+                    NormalTop = targetRect.Top,
+                    NormalRight = targetRect.Right,
+                    NormalBottom = targetRect.Bottom,
+                    ParkMonitor = destination.DeviceName
+                });
+            }
+            else if (Native.IsWindowVisible(h))
+            {
+                uint showCmd = _sleepWindowSnapshots.TryGetValue(h, out transit)
+                    ? transit.ShowCmd
+                    : 0;
+                ApplyTopologyPlacement(h, targetRect, showCmd, destination);
+            }
+        }
+    }
+
+    private Rectangle GetRecordedNormalRect(IntPtr h)
+    {
+        if (_hidden.TryGetValue(h, out HiddenWindowRecord? record))
+            return Rectangle.FromLTRB(record.NormalLeft, record.NormalTop,
+                record.NormalRight, record.NormalBottom);
+        var placement = new Native.WINDOWPLACEMENT
+        {
+            length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>()
+        };
+        if (Native.GetWindowPlacement(h, ref placement))
+            return FromRECT(placement.rcNormalPosition);
+        return Native.GetWindowRect(h, out Native.RECT rect) ? FromRECT(rect) : Rectangle.Empty;
+    }
+
+    private bool ApplyTopologyPlacement(IntPtr h, Rectangle target, uint savedShowCmd,
+        DisplaySnapshot destination)
+    {
+        if (target.Width <= 0 || target.Height <= 0 || !SafeToModifyWindow(h)) return false;
+        if (Native.IsIconic(h))
+            return RestoreIconicPlacement(h, target);
+        if (Native.IsZoomed(h) || savedShowCmd == Native.SW_SHOWMAXIMIZED)
+        {
+            Rectangle area = destination.WorkingArea;
+            bool moved = Native.SetWindowPos(h, IntPtr.Zero,
+                area.X, area.Y, area.Width, area.Height,
+                Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+            var placement = new Native.WINDOWPLACEMENT
+            {
+                length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>()
+            };
+            if (!Native.GetWindowPlacement(h, ref placement)) return moved;
+            placement.rcNormalPosition = ToRECT(target);
+            placement.showCmd = Native.SW_SHOWMAXIMIZED;
+            return moved && Native.SetWindowPlacement(h, ref placement);
+        }
+        return Native.SetWindowPos(h, IntPtr.Zero, target.X, target.Y, target.Width, target.Height,
+            Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+    }
+
+    private void RewriteHiddenMonitorNames(IReadOnlyDictionary<string, string> changes)
+    {
+        if (changes.Count == 0) return;
+        foreach ((IntPtr h, HiddenWindowRecord record) in _hidden.ToList())
+            if (record.ParkMonitor != null &&
+                changes.TryGetValue(record.ParkMonitor, out string? newDevice))
+                SetHiddenRecord(h, record with { ParkMonitor = newDevice });
+        PersistHidden();
+    }
+
+    private bool SyncCore()
+    {
+        if (_topologyTransitionInProgress) return false;
+
+        bool changed = false;
+        foreach (var h in _unmanageable.Keys.Where(h => !Native.IsWindow(h)).ToList())
+            _unmanageable.Remove(h);
+        foreach ((IntPtr h, WindowTransitSnapshot snapshot) in _sleepWindowSnapshots.ToList())
+            if (!MatchesWindowIdentity(h, snapshot.Identity))
+                _sleepWindowSnapshots.Remove(h);
+        changed |= ReconcileDisplayTopology(DisplayTopology.Capture());
+
         foreach (var st in _monitors.Values)
-            foreach (var set in st.Desktops)
-                if (set.RemoveWhere(h =>
+            foreach (var desktop in st.Desktops)
+                if (desktop.Windows.RemoveWhere(h =>
                 {
                     if (!Native.IsWindow(h))
                     {
@@ -1767,6 +2310,22 @@ internal sealed class DesktopManager
             string? dev = Native.GetMonitorDeviceOfWindow(h);
             if (dev == null || !_monitors.TryGetValue(dev, out var st)) continue;
 
+            // A display-topology transaction deliberately keeps an incoming desktop
+            // separate from the fallback's current desktop. If Windows made one of
+            // its windows visible while moving it off the vanished display, retry the
+            // presentation change but never adopt it into the fallback desktop.
+            DesktopState? logicalOwner = _monitors.Values
+                .SelectMany(m => m.Desktops)
+                .FirstOrDefault(d => d.Windows.Contains(h));
+            if (logicalOwner is { ReturnWhenOnline: true } &&
+                string.Equals(logicalOwner.HostStableId, st.StableId,
+                    StringComparison.OrdinalIgnoreCase) &&
+                !ReferenceEquals(logicalOwner, st.Desktops[st.Current]))
+            {
+                HideOrParkManagedWindows(new[] { h });
+                continue;
+            }
+
             // An application or the user may have shown one of our hidden windows.
             // Visible windows belong to the current desktop and must not remain in
             // the crash-recovery journal, even if already present in that set.
@@ -1775,14 +2334,14 @@ internal sealed class DesktopManager
                     $"Parked HWND={h} is back on screen; adopting it into the current desktop of '{dev}'.");
             changed |= RemoveHiddenRecord(h);
 
-            if (!st.Desktops[st.Current].Contains(h))
+            if (!st.Desktops[st.Current].Windows.Contains(h))
             {
                 // Başka bir set'te kayıtlıysa oradan çıkar (monitör değiştirmiş
                 // veya gizliyken uygulama tarafından tekrar gösterilmiş olabilir)
                 bool migrated = false;
                 foreach (var other in _monitors.Values)
-                    foreach (var set in other.Desktops)
-                        if (set.Remove(h))
+                    foreach (var desktop in other.Desktops)
+                        if (desktop.Windows.Remove(h))
                         {
                             migrated = true;
                             changed = true;
@@ -1804,7 +2363,8 @@ internal sealed class DesktopManager
     /// <summary>Genel bakış arayüzü için tam düzen (monitör başına yerel numaralarla).</summary>
     public IReadOnlyList<MonitorEntry> GetLayout()
     {
-        Sync();
+        if (!_topologyTransitionInProgress)
+            Sync();
         var result = new List<MonitorEntry>();
         int ordinal = 0;
         foreach (var st in OrderedMonitors())
@@ -1813,7 +2373,7 @@ internal sealed class DesktopManager
             var desktops = new List<DesktopEntry>();
             for (int i = 0; i < st.Desktops.Count; i++)
             {
-                var windows = st.Desktops[i]
+                var windows = st.Desktops[i].Windows
                     .Where(Native.IsWindow)
                     .Select(h =>
                     {
@@ -1823,7 +2383,8 @@ internal sealed class DesktopManager
                     .ToList();
                 desktops.Add(new DesktopEntry(i, i == st.Current, windows));
             }
-            result.Add(new MonitorEntry(st.Device, ordinal, desktops));
+            result.Add(new MonitorEntry(st.Device, ordinal,
+                OwnedDesktopCount(st) < MaxDesktopsPerMonitor, desktops));
         }
         return result;
     }
@@ -1834,6 +2395,7 @@ internal sealed class DesktopManager
     /// Son masaüstünde ileri geçiş, masaüstünde pencere varsa yeni masaüstü oluşturur.</summary>
     public void SwitchRelative(int delta)
     {
+        if (_topologyTransitionInProgress) return;
         string? dev = Native.GetMonitorDeviceUnderCursor();
         if (dev == null)
         {
@@ -1862,10 +2424,10 @@ internal sealed class DesktopManager
             // treat the desktop as empty to avoid creating desktops endlessly at the end. Uncached
             // windows get a live integrity probe (query only, no registration — registration happens
             // only when a window is actually hidden/parked).
-            bool hasEffectiveWindows = st.Desktops[st.Current]
+            bool hasEffectiveWindows = st.Desktops[st.Current].Windows
                 .Any(h => Native.IsWindow(h) && !IsKnownUnmanageable(h) && !ShouldSkipForIntegrity(h, out _));
             bool canGrow = delta > 0
-                && st.Desktops.Count < MaxDesktopsPerMonitor
+                && OwnedDesktopCount(st) < MaxDesktopsPerMonitor
                 && hasEffectiveWindows; // boş masaüstünden yenisi açılmaz
             if (!canGrow)
             {
@@ -1882,13 +2444,13 @@ internal sealed class DesktopManager
         if (!SwitchToCore(st, target) && createdDesktop)
         {
             st.Desktops.RemoveAt(st.Desktops.Count - 1);
-            st.LastActive.RemoveAt(st.LastActive.Count - 1);
         }
     }
 
     /// <summary>Global masaüstü numarasına geçer (hangi monitörde olduğunu kendisi bulur).</summary>
     public void SwitchToGlobal(int number)
     {
+        if (_topologyTransitionInProgress) return;
         Sync();
         var resolved = ResolveGlobal(number);
         if (resolved != null)
@@ -1904,6 +2466,7 @@ internal sealed class DesktopManager
     /// <summary>Belirli monitörde belirli yerel masaüstüne geçer.</summary>
     public void SwitchTo(string device, int localIndex)
     {
+        if (_topologyTransitionInProgress) return;
         Sync();
         if (_monitors.TryGetValue(device, out var st) && localIndex >= 0 && localIndex < st.Desktops.Count)
             SwitchToCore(st, localIndex);
@@ -1912,23 +2475,24 @@ internal sealed class DesktopManager
     /// <summary>Verilen monitörde yeni boş masaüstü oluşturur ve ona geçer.</summary>
     public void CreateDesktopAndSwitch(string device)
     {
+        if (_topologyTransitionInProgress) return;
         Sync();
         if (!_monitors.TryGetValue(device, out var st)) return;
-        if (st.Desktops.Count >= MaxDesktopsPerMonitor) return;
+        if (OwnedDesktopCount(st) >= MaxDesktopsPerMonitor) return;
         AddDesktop(st);
         if (!SwitchToCore(st, st.Desktops.Count - 1))
         {
             st.Desktops.RemoveAt(st.Desktops.Count - 1);
-            st.LastActive.RemoveAt(st.LastActive.Count - 1);
         }
     }
 
     /// <summary>Yeni boş masaüstü oluşturur ancak aktif masaüstünü değiştirmez.</summary>
     public bool CreateDesktop(string device)
     {
+        if (_topologyTransitionInProgress) return false;
         Sync();
         if (!_monitors.TryGetValue(device, out var st)) return false;
-        if (st.Desktops.Count >= MaxDesktopsPerMonitor) return false;
+        if (OwnedDesktopCount(st) >= MaxDesktopsPerMonitor) return false;
         AddDesktop(st);
         _retainedEmptyDesktops.Add(st.Desktops[^1]);
         return true;
@@ -1938,6 +2502,7 @@ internal sealed class DesktopManager
     /// genel bakışın açık kalabilmesi için yeni masaüstüne geçiş yapmaz.</summary>
     public bool CreateDesktopAndMoveWindow(IntPtr h, string dstDevice)
     {
+        if (_topologyTransitionInProgress) return false;
         BeginIdentityCache();
         try
         {
@@ -1954,7 +2519,7 @@ internal sealed class DesktopManager
         Sync();
         if (!Native.IsWindow(h)) return false;
         if (!_monitors.TryGetValue(dstDevice, out var dst)) return false;
-        if (dst.Desktops.Count >= MaxDesktopsPerMonitor) return false;
+        if (OwnedDesktopCount(dst) >= MaxDesktopsPerMonitor) return false;
         // Integrity-skipped windows remain visible by design. Do not create an
         // empty desktop and only pretend to move one in the model.
         if (!CanReassignWindow(h, nameof(CreateDesktopAndMoveWindow))) return false;
@@ -1976,11 +2541,11 @@ internal sealed class DesktopManager
         _retainedEmptyDesktops.Add(dst.Desktops[target]);
 
         foreach (var st in _monitors.Values)
-            foreach (var set in st.Desktops)
-                set.Remove(h);
+            foreach (var desktop in st.Desktops)
+                desktop.Windows.Remove(h);
 
         AddWindow(dst.Desktops[target], h);
-        dst.LastActive[target] = h;
+        dst.Desktops[target].LastActive = h;
 
         foreach (var st in _monitors.Values) PruneTrailingEmpty(st);
         PersistHidden();
@@ -1992,6 +2557,7 @@ internal sealed class DesktopManager
     /// en az bir masaüstü kalır.</summary>
     public bool DeleteDesktop(string device, int localIndex)
     {
+        if (_topologyTransitionInProgress) return false;
         BeginIdentityCache();
         try
         {
@@ -2016,31 +2582,30 @@ internal sealed class DesktopManager
         int targetBeforeRemoval = localIndex > 0 ? localIndex - 1 : 1;
         var target = st.Desktops[targetBeforeRemoval];
 
-        IntPtr movedFocus = st.LastActive[localIndex];
-        if (!Native.IsWindow(movedFocus) || !removed.Contains(movedFocus))
-            movedFocus = removed.FirstOrDefault(Native.IsWindow);
+        IntPtr movedFocus = removed.LastActive;
+        if (!Native.IsWindow(movedFocus) || !removed.Windows.Contains(movedFocus))
+            movedFocus = removed.Windows.FirstOrDefault(Native.IsWindow);
 
-        foreach (var h in removed)
+        foreach (var h in removed.Windows)
             if (Native.IsWindow(h))
                 AddWindow(target, h);
 
         _retainedEmptyDesktops.Remove(removed);
         st.Desktops.RemoveAt(localIndex);
-        st.LastActive.RemoveAt(localIndex);
 
         int targetIndex = st.Desktops.IndexOf(target);
         st.Current = removedWasCurrent ? targetIndex : st.Desktops.IndexOf(current);
 
         if (targetIndex >= 0 && movedFocus != IntPtr.Zero &&
-            (removedWasCurrent || !Native.IsWindow(st.LastActive[targetIndex])))
-            st.LastActive[targetIndex] = movedFocus;
+            (removedWasCurrent || !Native.IsWindow(st.Desktops[targetIndex].LastActive)))
+            st.Desktops[targetIndex].LastActive = movedFocus;
 
         bool targetIsCurrent = st.Current == targetIndex;
-        foreach (var h in target.ToList())
+        foreach (var h in target.Windows.ToList())
         {
             if (!Native.IsWindow(h))
             {
-                target.Remove(h);
+                target.Windows.Remove(h);
                 RemoveHiddenRecord(h);
                 continue;
             }
@@ -2052,7 +2617,7 @@ internal sealed class DesktopManager
         }
 
         if (!targetIsCurrent)
-            HideOrParkManagedWindows(target);
+            HideOrParkManagedWindows(target.Windows);
 
         PruneTrailingEmpty(st);
         PersistHidden();
@@ -2079,7 +2644,7 @@ internal sealed class DesktopManager
     {
         if (st.Current == target)
         {
-            bool accessible = RestoreManagedWindows(st.Desktops[target]);
+            bool accessible = RestoreManagedWindows(st.Desktops[target].Windows);
             PersistHidden();
             if (!accessible)
                 RaiseWindowControlWarning(nameof(SwitchToCore),
@@ -2093,12 +2658,12 @@ internal sealed class DesktopManager
             $"Switch begin: '{st.Device}' {st.Current} -> {target}.");
 
         IntPtr fg = Native.GetForegroundWindow();
-        if (st.Desktops[st.Current].Contains(fg))
-            st.LastActive[st.Current] = fg;
+        if (st.Desktops[st.Current].Windows.Contains(fg))
+            st.Desktops[st.Current].LastActive = fg;
 
         int source = st.Current;
-        var sourceWindows = st.Desktops[source].ToList();
-        var targetWindows = st.Desktops[target].ToList();
+        var sourceWindows = st.Desktops[source].Windows.ToList();
+        var targetWindows = st.Desktops[target].Windows.ToList();
         var targetInitiallyManaged = targetWindows.Where(_hidden.ContainsKey).ToHashSet();
         var targetSuccessfullyRestored = new List<IntPtr>();
         IntPtr targetRestoreFailure = IntPtr.Zero;
@@ -2113,19 +2678,19 @@ internal sealed class DesktopManager
         var restorePending = new List<IntPtr>();
         foreach (var h in targetWindows)
         {
-            if (!Native.IsWindow(h)) { st.Desktops[target].Remove(h); continue; }
+            if (!Native.IsWindow(h)) { st.Desktops[target].Windows.Remove(h); continue; }
             if (!Native.IsWindowVisible(h) && !_hidden.ContainsKey(h))
             {
                 // The application hid this window itself after the last sync.
                 // It is not ours to show; discard the stale membership and let a
                 // later Sync adopt it wherever it becomes visible again.
-                st.Desktops[target].Remove(h);
+                st.Desktops[target].Windows.Remove(h);
                 continue;
             }
             switch (TryRestoreTargetWindow(h, targetInitiallyManaged, targetSuccessfullyRestored))
             {
                 case TargetRestoreOutcome.Pruned:
-                    st.Desktops[target].Remove(h);
+                    st.Desktops[target].Windows.Remove(h);
                     break;
                 case TargetRestoreOutcome.Failed:
                     restorePending.Add(h);
@@ -2150,7 +2715,7 @@ internal sealed class DesktopManager
                 switch (TryRestoreTargetWindow(h, targetInitiallyManaged, targetSuccessfullyRestored))
                 {
                     case TargetRestoreOutcome.Pruned:
-                        st.Desktops[target].Remove(h);
+                        st.Desktops[target].Windows.Remove(h);
                         break;
                     case TargetRestoreOutcome.Failed:
                         remaining.Add(h);
@@ -2185,14 +2750,19 @@ internal sealed class DesktopManager
 
         // The externally visible window state is now complete; commit the model.
         st.Current = target;
+        DesktopState committedDesktop = st.Desktops[target];
+        if (committedDesktop.ReturnWhenOnline &&
+            _borrowedDisplays.TryGetValue(committedDesktop.HomeStableId,
+                out BorrowedDisplayState? borrowed))
+            borrowed.PreferredCurrent = committedDesktop.RuntimeId;
         AppLog.Info(nameof(SwitchToCore),
             $"Switch committed: '{st.Device}' -> desktop {target}.");
 
         // Odağı hedef masaüstünde en son aktif olan görünür pencereye ver
-        IntPtr focus = st.LastActive[target];
+        IntPtr focus = st.Desktops[target].LastActive;
         if (!Native.IsWindow(focus) || !Native.IsWindowVisible(focus) ||
-            !st.Desktops[target].Contains(focus))
-            focus = st.Desktops[target].FirstOrDefault(h =>
+            !st.Desktops[target].Windows.Contains(focus))
+            focus = st.Desktops[target].Windows.FirstOrDefault(h =>
                 Native.IsWindow(h) && Native.IsWindowVisible(h) && !Native.IsIconic(h));
         if (focus != IntPtr.Zero && WindowResponds(focus))
             Native.SetForegroundWindow(focus);
@@ -2251,7 +2821,10 @@ internal sealed class DesktopManager
             if (now <= internalUntil) return;
             _internalMinimizeUntil.Remove(h);
         }
-        bool belongsToCurrent = _monitors.Values.Any(st => st.Desktops[st.Current].Contains(h));
+        bool belongsToCurrent = _monitors.Values.Any(st =>
+            st.Current >= 0 &&
+            st.Current < st.Desktops.Count &&
+            st.Desktops[st.Current].Windows.Contains(h));
         if (!belongsToCurrent) return;
         if (_hidden.TryGetValue(h, out var record) && record.Parked) return;
 
@@ -2387,9 +2960,9 @@ internal sealed class DesktopManager
             // (the same trap the hidden-mode jump documents in HandleHiddenForegroundActivated).
             foreach (var st in _monitors.Values)
                 for (int i = 0; i < st.Desktops.Count; i++)
-                    if (st.Desktops[i].Contains(h))
+                    if (st.Desktops[i].Windows.Contains(h))
                     {
-                        st.LastActive[i] = h;
+                        st.Desktops[i].LastActive = h;
                         AppLog.Info(nameof(HandleForegroundActivated),
                             $"Taskbar jump: HWND={h} -> '{st.Device}' desktop {i}.");
                         SwitchToCore(st, i);
@@ -2439,11 +3012,11 @@ internal sealed class DesktopManager
             string? dev = Native.GetMonitorDeviceOfWindow(h);
             foreach (var st in _monitors.Values)
                 for (int i = 0; i < st.Desktops.Count; i++)
-                    if (st.Desktops[i].Contains(h))
+                    if (st.Desktops[i].Windows.Contains(h))
                     {
                         if (i != st.Current && st.Device == dev)
                         {
-                            st.LastActive[i] = h;
+                            st.Desktops[i].LastActive = h;
                             AppLog.Info(nameof(HandleForegroundActivated),
                                 $"Taskbar jump (hidden mode): HWND={h} -> '{st.Device}' desktop {i}.");
                             SwitchToCore(st, i);
@@ -2475,13 +3048,14 @@ internal sealed class DesktopManager
     /// first when the window is minimized. Used by the double-click direct jump of window entries.</summary>
     public void SwitchToWindow(IntPtr h)
     {
+        if (_topologyTransitionInProgress) return;
         if (!Native.IsWindow(h)) return;
         Sync();
         foreach (var st in _monitors.Values)
             for (int i = 0; i < st.Desktops.Count; i++)
-                if (st.Desktops[i].Contains(h))
+                if (st.Desktops[i].Windows.Contains(h))
                 {
-                    st.LastActive[i] = h;
+                    st.Desktops[i].LastActive = h;
                     if (SwitchToCore(st, i))
                         RestoreAndFocusWindow(h);
                     return;
@@ -2527,6 +3101,7 @@ internal sealed class DesktopManager
     /// <summary>Switch shared taskbar mode transactionally; commit the mode only after every window state has been updated.</summary>
     public bool SetSharedTaskbarMode(bool enable)
     {
+        if (_topologyTransitionInProgress) return false;
         if (enable == SharedTaskbar) return true;
         BeginIdentityCache();
         try
@@ -2546,7 +3121,7 @@ internal sealed class DesktopManager
         _monitors.Values
             .SelectMany(st => st.Desktops
                 .Where((_, i) => i != st.Current)
-                .SelectMany(set => set))
+                .SelectMany(desktop => desktop.Windows))
             .ToList();
 
     private bool SetSharedTaskbarModeCore(bool enable)
@@ -2672,6 +3247,7 @@ internal sealed class DesktopManager
     /// (e.g. an elevated one) is not moved and no desktop is created; the UI is notified.</summary>
     public void MoveActiveWindow(int delta)
     {
+        if (_topologyTransitionInProgress) return;
         BeginIdentityCache();
         try
         {
@@ -2700,25 +3276,24 @@ internal sealed class DesktopManager
         bool createdDesktop = false;
         if (target >= st.Desktops.Count)
         {
-            if (delta <= 0 || st.Desktops.Count >= MaxDesktopsPerMonitor) return;
+            if (delta <= 0 || OwnedDesktopCount(st) >= MaxDesktopsPerMonitor) return;
             AddDesktop(st);
             createdDesktop = true;
             target = st.Desktops.Count - 1;
         }
 
-        if (!HideOrParkManagedWindows(st.Desktops[st.Current].Where(h => h != fg)))
+        if (!HideOrParkManagedWindows(st.Desktops[st.Current].Windows.Where(h => h != fg)))
         {
             if (createdDesktop)
             {
                 st.Desktops.RemoveAt(target);
-                st.LastActive.RemoveAt(target);
             }
             return;
         }
 
-        st.Desktops[st.Current].Remove(fg);
+        st.Desktops[st.Current].Windows.Remove(fg);
         AddWindow(st.Desktops[target], fg);
-        st.LastActive[target] = fg;
+        st.Desktops[target].LastActive = fg;
         SwitchToCore(st, target);
     }
 
@@ -2726,6 +3301,7 @@ internal sealed class DesktopManager
     /// (genel bakıştaki sürükle-bırak ve sağ tık menüsü bunu kullanır).</summary>
     public void MoveWindowToDesktop(IntPtr h, string dstDevice, int dstLocal)
     {
+        if (_topologyTransitionInProgress) return;
         BeginIdentityCache();
         try
         {
@@ -2761,11 +3337,11 @@ internal sealed class DesktopManager
         }
 
         foreach (var st in _monitors.Values)
-            foreach (var set in st.Desktops)
-                set.Remove(h);
+            foreach (var desktop in st.Desktops)
+                desktop.Windows.Remove(h);
 
         AddWindow(dst.Desktops[dstLocal], h);
-        dst.LastActive[dstLocal] = h;
+        dst.Desktops[dstLocal].LastActive = h;
 
         if (dst.Current == dstLocal)
         {
@@ -2779,8 +3355,8 @@ internal sealed class DesktopManager
     private string? FindWindowDevice(IntPtr h)
     {
         foreach (var st in _monitors.Values)
-            foreach (var set in st.Desktops)
-                if (set.Contains(h))
+            foreach (var desktop in st.Desktops)
+                if (desktop.Windows.Contains(h))
                     return st.Device;
         return null;
     }
@@ -2788,6 +3364,7 @@ internal sealed class DesktopManager
     /// <summary>Bir masaüstünü aynı veya başka monitörde belirtilen ekleme konumuna taşır.</summary>
     public bool MoveDesktop(string srcDevice, int srcLocal, string dstDevice, int dstInsertIndex)
     {
+        if (_topologyTransitionInProgress) return false;
         BeginIdentityCache();
         try
         {
@@ -2810,42 +3387,46 @@ internal sealed class DesktopManager
         {
             var current = src.Desktops[src.Current];
             var reorderedDesktop = src.Desktops[srcLocal];
-            var reorderedLastActive = src.LastActive[srcLocal];
 
             dstInsertIndex = Math.Clamp(dstInsertIndex, 0, src.Desktops.Count);
             src.Desktops.RemoveAt(srcLocal);
-            src.LastActive.RemoveAt(srcLocal);
             if (dstInsertIndex > srcLocal) dstInsertIndex--;
 
             src.Desktops.Insert(dstInsertIndex, reorderedDesktop);
-            src.LastActive.Insert(dstInsertIndex, reorderedLastActive);
             src.Current = src.Desktops.IndexOf(current);
+            if (reorderedDesktop.ReturnWhenOnline &&
+                _borrowedDisplays.TryGetValue(reorderedDesktop.HomeStableId,
+                    out BorrowedDisplayState? borrowed))
+                borrowed.OriginalOrder = src.Desktops
+                    .Where(d => string.Equals(d.HomeStableId, reorderedDesktop.HomeStableId,
+                        StringComparison.OrdinalIgnoreCase))
+                    .Select(d => d.RuntimeId)
+                    .ToList();
             PersistHidden();
             return true;
         }
 
-        if (dst.Desktops.Count >= MaxDesktopsPerMonitor) return false;
+        if (OwnedDesktopCount(dst) >= MaxDesktopsPerMonitor) return false;
         dstInsertIndex = Math.Clamp(dstInsertIndex, 0, dst.Desktops.Count);
 
-        var set = src.Desktops[srcLocal];
+        var desktop = src.Desktops[srcLocal];
         // Repositioning a whole desktop across displays is all-or-nothing. A
         // single integrity-skipped window must reject the operation before the
         // source/destination lists or any window geometry are changed.
-        foreach (IntPtr h in set.Where(Native.IsWindow))
+        foreach (IntPtr h in desktop.Windows.Where(Native.IsWindow))
             if (!CanReassignWindow(h, nameof(MoveDesktop)))
                 return false;
         bool wasCurrent = src.Current == srcLocal;
-        if (!HideOrParkManagedWindows(set)) return false;
-        var last = src.LastActive[srcLocal];
+        if (!HideOrParkManagedWindows(desktop.Windows)) return false;
         var dstCurrent = dst.Desktops[dst.Current];
 
         // Do not mutate either desktop list until every physical window move has
         // been verified. If one move fails, return already moved windows to the
         // source display and restore visibility when the source desktop was active.
         var repositioned = new List<IntPtr>();
-        foreach (var h in set.ToList())
+        foreach (var h in desktop.Windows.ToList())
         {
-            if (!Native.IsWindow(h)) { set.Remove(h); continue; }
+            if (!Native.IsWindow(h)) { desktop.Windows.Remove(h); continue; }
             if (RepositionWindow(h, srcDevice, dstDevice))
             {
                 repositioned.Add(h);
@@ -2855,7 +3436,7 @@ internal sealed class DesktopManager
             bool geometryRolledBack = true;
             foreach (IntPtr moved in repositioned.AsEnumerable().Reverse())
                 geometryRolledBack &= RepositionWindow(moved, dstDevice, srcDevice);
-            bool presentationRolledBack = !wasCurrent || RestoreManagedWindows(set);
+            bool presentationRolledBack = !wasCurrent || RestoreManagedWindows(desktop.Windows);
             PersistHidden();
             if (!geometryRolledBack || !presentationRolledBack)
                 AppLog.Warning(nameof(MoveDesktop),
@@ -2864,18 +3445,19 @@ internal sealed class DesktopManager
         }
 
         src.Desktops.RemoveAt(srcLocal);
-        src.LastActive.RemoveAt(srcLocal);
         if (src.Desktops.Count == 0) AddDesktop(src);
         if (src.Current > srcLocal) src.Current--;
         if (src.Current >= src.Desktops.Count) src.Current = src.Desktops.Count - 1;
 
-        dst.Desktops.Insert(dstInsertIndex, set);
-        dst.LastActive.Insert(dstInsertIndex, last);
+        desktop.HomeStableId = dst.StableId;
+        desktop.HostStableId = dst.StableId;
+        desktop.ReturnWhenOnline = false;
+        dst.Desktops.Insert(dstInsertIndex, desktop);
         dst.Current = dst.Desktops.IndexOf(dstCurrent);
 
         // Kaynak monitörde aktif masaüstü taşındıysa kalan aktif masaüstünü görünür yap
         if (wasCurrent)
-            foreach (var h in src.Desktops[src.Current])
+            foreach (var h in src.Desktops[src.Current].Windows)
                 ShowOrUnparkManagedWindow(h);
 
         PruneTrailingEmpty(src);
@@ -3171,6 +3753,32 @@ internal sealed class DesktopManager
         double relativeY = sourceArea.Height > 0
             ? (rect.Top - sourceArea.Top) / (double)sourceArea.Height
             : 0;
+        int x = destinationArea.Left + (int)Math.Round(relativeX * destinationArea.Width);
+        int y = destinationArea.Top + (int)Math.Round(relativeY * destinationArea.Height);
+        x = Math.Clamp(x, destinationArea.Left, Math.Max(destinationArea.Left, destinationArea.Right - width));
+        y = Math.Clamp(y, destinationArea.Top, Math.Max(destinationArea.Top, destinationArea.Bottom - height));
+        return new Rectangle(x, y, width, height);
+    }
+
+    private static Rectangle MapWindowRect(Rectangle rect, DisplaySnapshot source,
+        DisplaySnapshot destination)
+    {
+        if (rect.Width <= 0 || rect.Height <= 0) return rect;
+        Rectangle sourceArea = source.WorkingArea.Width > 0 && source.WorkingArea.Height > 0
+            ? source.WorkingArea
+            : source.Bounds;
+        Rectangle destinationArea = destination.WorkingArea.Width > 0 && destination.WorkingArea.Height > 0
+            ? destination.WorkingArea
+            : destination.Bounds;
+        if (sourceArea.Width <= 0 || sourceArea.Height <= 0 ||
+            destinationArea.Width <= 0 || destinationArea.Height <= 0)
+            return rect;
+
+        double dpiRatio = source.Dpi > 0 ? destination.Dpi / (double)source.Dpi : 1.0;
+        int width = Math.Clamp((int)Math.Round(rect.Width * dpiRatio), 1, destinationArea.Width);
+        int height = Math.Clamp((int)Math.Round(rect.Height * dpiRatio), 1, destinationArea.Height);
+        double relativeX = (rect.Left - sourceArea.Left) / (double)sourceArea.Width;
+        double relativeY = (rect.Top - sourceArea.Top) / (double)sourceArea.Height;
         int x = destinationArea.Left + (int)Math.Round(relativeX * destinationArea.Width);
         int y = destinationArea.Top + (int)Math.Round(relativeY * destinationArea.Height);
         x = Math.Clamp(x, destinationArea.Left, Math.Max(destinationArea.Left, destinationArea.Right - width));

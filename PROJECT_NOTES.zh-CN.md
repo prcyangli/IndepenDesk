@@ -1,8 +1,44 @@
 # IndepenDesk 本地修改与审查记录
 
-更新日期：2026-09-18（v0.4.15）
+更新日期：2026-09-21（v0.4.16 开发中）
 
 本文记录基于 `main` 分支（原始基线提交 `21c9b74`）完成的本地功能修改、代码审查结论、本轮修复状态和验证清单。
+
+## v0.4.16（开发中）：睡眠/唤醒时保留外接显示器的桌面分组
+
+- **问题**：睡眠恢复早期 Windows 可能暂时只枚举内接显示器。旧 `SyncCore` 将消失显示器的 `MonitorState` 立即删除，逐一恢复其所有窗口，再统一加入在线显示器的当前桌面；随后“可见窗口必须属于所在显示器当前桌面”的同步不变量会固化该结果，外屏的多个桌面因此永久合并。
+- **桌面对象化**：桌面由匿名窗口集合升级为带运行时身份、原始显示器、当前承载显示器、最后活动窗口和自动归还标记的 `DesktopState`。显示器离线时迁移的是完整桌面对象，不再合并窗口集合；借入桌面不计入承载显示器自己的 9 桌面创建上限。
+- **内存拓扑状态机**：隐藏消息窗口处理 `WM_POWERBROADCAST` 与 `WM_DISPLAYCHANGE`。睡眠前保存在线拓扑和窗口位置快照；唤醒后暂停普通同步，按 350 ms 采样，连续两次一致（最长 3 秒）后协调拓扑。变化期间暂停热键、前台窗口事件和桌面变更入口，异常时解除保护并恢复周期同步。
+- **稳定显示器身份**：新增 `DisplayTopology`，通过 `QueryDisplayConfig` 的 monitor device path 匹配物理显示器，并读取输出技术识别内接面板；`EnumDisplayDevices`/GDI 设备名作为降级路径。支持睡眠后 `\\.\DISPLAYx` 重编号乃至两台显示器互换编号，隐藏窗口记录中的路由名批量重写，避免逐项换名覆盖。
+- **借用/归还语义**：外屏缺失时，其桌面按原顺序追加到内屏但全部保持独立，内屏原当前桌面不变；窗口按缓存工作区/DPI 映射后隐藏或停放。外屏在同一进程中重新出现时，仍标记自动归还的桌面整体返回，恢复离线期间最后访问的外屏桌面；删除、窗口跨桌面移动和显式整桌面跨屏移动均保留用户的新意图。
+- **位置与恢复边界**：未改动的窗口优先使用睡眠前原矩形，离线期间调整过的窗口从承载屏映射回原屏；普通、最大化、最小化以及隐藏/共享任务栏记录均复用现有安全恢复链。桌面归属只存内存，不保证关机、应用退出或崩溃重启后恢复；现有隐藏窗口恢复日志继续负责防止窗口永久不可见。
+- **验证状态**：DisplayConfig 真机只读探测已确认能区分本机内屏与外屏；Debug/Release、win-x64/win-x86/win-arm64 构建及 latest .NET analyzers 均为 0 警告、0 错误。真实睡眠、睡眠期间拔屏、重接及两种任务栏模式仍需双屏真机回归。
+
+## 第五轮静态审查（2026-09-21，v0.4.16 未提交源码：睡眠/唤醒拓扑协调）
+
+本轮通读全部未提交改动（`DesktopManager.cs` +929/-169、`TrayApp.cs` +135、`Native.cs` +6、`OverviewForm.cs` +8、新文件 `DisplayTopology.cs` 290 行），重点推演睡眠前快照、唤醒稳定化采样、借/还事务、SyncCore 反收养分支与异常中断路径。另完成构建矩阵（Debug/Release/latest analyzers/win-x64/x86/arm64 自包含均 0 警告 0 错误）与 x64 单文件 publish 冒烟（接管旧实例后 14/14 热键注册、无 WARN/ERROR、`DisplayTopology` 降级警告未触发）。**真实睡眠/唤醒回归仍未执行，以下结论以静态推演为主。**
+
+### 中优先级
+
+- **`HandleMinimizeStarted` 遍历 `_monitors.Values` 时对空 `Desktops` 的 MonitorState 会越界**（`bool belongsToCurrent = _monitors.Values.Any(st => st.Desktops[st.Current].Windows.Contains(h))`，`src/DesktopManager.cs:2957` 附近）。正常路径每个 MonitorState 至少 1 个桌面（`ReconcileDisplayTopology` 新建借组显示器后由 `ReturnBorrowedDisplay` 或 `AddDesktop` 兜底填充），但 `CompleteDisplayTopologyChange` 的 `finally` 先清 `_topologyTransitionInProgress` 再把异常上抛（由 `OnTopologyTick` 吞掉）——若 `ReconcileDisplayTopology` 恰在"新建借组空 monitor"与"填充桌面"之间中断，可残留空 `Desktops` 状态；此后任一最小化事件即 `ArgumentOutOfRangeException` → UI 线程 `ThreadException` → 整个应用退出（靠 crash-safe 日志兜底恢复）。同文件其余 `st.Desktops[st.Current]` 访问点的 `st` 均来自真实在线显示器名解析，风险独此一处（它遍历全集）。建议：该表达式加 `st.Desktops.Count > 0` 过滤，防御成本一行。
+- **`DisplayTopology.DisplayConfigModeInfoUnion` 的 `Size=48` 与 C 布局不符**（`src/DisplayTopology.cs:242`）。C 侧 union 成员为 SOURCE_MODE(16)/TARGET_MODE(20)/DESKTOP_IMAGE_INFO(32)，实际大小 32；C# 元素 64 字节 vs C 48 字节。当前 `modes` 数组仅作 `QueryDisplayConfig` 必需的占位输出、内容从不读取，且托管缓冲偏大不会越界写——功能无害；但未来一旦按索引读取 `modes` 即从第 1 个元素起错位。建议改 `Size=32` 并注明"占位用，按 C 联合体对齐"。
+
+### 低优先级
+
+- **`MapWindowRect` 双实现重复**：新 `DisplaySnapshot` 版（`src/DesktopManager.cs:3760`）与旧 `Screen` 版（`:3733`）算法一致，新版仅多 WorkingArea 空回退与尺寸防御。建议旧版改为适配层调用新版，避免后续修一处漏一处。
+- **拓扑过渡期（350 ms 采样 × 2 次一致，最长 3 s）所有入口静默早退**：热键、菜单"新建桌面"、`SwitchToWindow`、`SetSharedTaskbarMode` 等直接 return，用户无任何反馈（设计如此，但托盘菜单操作失败毫无提示）。可选：过渡期首次拦截时弹一次 OSD/日志提示。
+- **唤醒消息双丢的自愈兜底缺失**：`OnPowerSuspend` 停掉 `_syncTimer` 后，恢复依赖 `PBT_APMRESUMEAUTOMATIC`（文档保证必发）与 `WM_DISPLAYCHANGE` 至少其一到达；若双双丢失（理论不应发生，Modern Standby 驱动怪癖除外），周期协调永久停摆。可在 `OnHotkey` 对"`TopologyTransitionInProgress` 仍真且 `_topologyTimer` 已停"的状态做一次性 `ResumePeriodicSync` 自愈。
+- **3 s 硬超时会应用仍在变化的中间态拓扑**：用户恰在设置中拖动分辨率/位置时，超时即把瞬态当稳定态应用；下一次 `WM_DISPLAYCHANGE` 会再走一轮完整协调，有日志，可接受。
+- `PBT_APMSUSPEND` 处理先完整 `Sync()` 再快照：窗口多且有挂死窗口时总耗时可能接近系统 suspend 时限，快照若被强杀中断，唤醒后退化为无快照路径（`BorrowMissingDisplay` 现场捕获身份），位置精度下降但功能可用。属已知权衡。
+
+### 本轮复核确认无问题（不再重复展开）
+
+- **封送正确性**：`DisplayConfigPathInfo`（80 B）、`DisplayConfigSourceDeviceName`（88 B）、`DisplayConfigTargetDeviceName`（424 B）、`DisplayConfigDeviceInfoHeader`（24 B）均与 C 布局逐字节核对一致；`GetDisplayConfigBufferSizes`→`QueryDisplayConfig` 的 122 重试循环正确；`GetLegacyStableId` 的 `DeviceKey` 优先于 `DeviceId`（注册表硬件键稳定）合理；新增常量（`WM_DISPLAYCHANGE`=0x7E、`WM_POWERBROADCAST`=0x218、`PBT_APMSUSPEND/RESUMECRITICAL/RESUMESUSPEND/RESUMEAUTOMATIC`）全部正确。
+- **身份与快照生命周期**：`MatchesWindowIdentity`（Class+PID+SessionId+StartTime）不含标题，浏览器换页不误伤 `_sleepWindowSnapshots`；`SyncCore` 每秒清过期快照项；借/还前逐窗核验 HWND 复用。
+- **借/还事务对称性**：连环借（fallback 自身再离线）正确更新组 `HostStableId` 与桌面归属；整组按 `OriginalOrder` 还原、`PreferredCurrent`/`HostPreviousCurrent` 双端恢复当前桌面；借来桌面不计 `OwnedDesktopCount` 上限且 Overview 的 `CanCreateDesktop` 同口径；`_retainedEmptyDesktops` 各移除路径清理一致、无泄漏；全离线（Capture 空集）时全部状态保留并告警，不误删。
+- **用户意图保留**：`MoveDesktop` 跨屏显式移动重置 `Home/Host/ReturnWhenOnline`（不随借还回流）；同屏重排同步更新借组 `OriginalOrder`；`SwitchToCore` 提交借来桌面时更新组 `PreferredCurrent`；`DeleteDesktop`/窗口跨桌面移动语义不变。
+- **反收养防线**：`SyncCore` 的 `logicalOwner` 分支防止借来桌面窗口被"可见窗口必须属于当前桌面"不变量收编进 fallback 当前桌面；隐藏失败（窗口仍可见）时靠该分支 1 s 内自愈重试。
+- **落盘与定时器**：`PersistHidden` 版本+内容双去重（`RestoreOnlineSuspendPlacements` 的无条件调用为空操作）；`_topologyTimer` Stop/Dispose 与三条异常路径（OnPowerSuspend/OnPowerResume/OnTopologyTick catch）的 `Cancel`+`ResumePeriodicSync` 覆盖完整；`ArmTopologyStabilization` 在风暴期不重置 3 s 超时基准，防无限延期。
 
 ## v0.4.15：共享任务栏停车机制重设计——最小化停车（2026-09-18）
 

@@ -21,6 +21,7 @@ internal sealed class TrayApp : ApplicationContext
     // A journaled window was shown by its app (usually without activation): reconcile
     // shortly. The delay leaves a taskbar jump (foreground event) a chance to fire first.
     private readonly System.Windows.Forms.Timer _shownReconcileTimer = new() { Interval = 400 };
+    private readonly System.Windows.Forms.Timer _topologyTimer = new() { Interval = 350 };
     private Native.WinEventDelegate? _foregroundProc;
     private IntPtr _foregroundHook;
     private IntPtr _minimizeHook;
@@ -29,10 +30,13 @@ internal sealed class TrayApp : ApplicationContext
     private bool _resourcesDisposed;
     private bool _windowWarningShown;
     private int _idleSyncPasses;
+    private string? _lastTopologySignature;
+    private int _stableTopologySamples;
+    private long _topologyStartedAt;
 
     public TrayApp()
     {
-        _hotkeys = new HotkeyWindow(OnHotkey);
+        _hotkeys = new HotkeyWindow(OnHotkey, OnPowerSuspend, OnPowerResume, OnDisplayChange);
 #if !DEBUG
         if (!StartupManager.ApplyOnLaunch())
             AppLog.Warning(nameof(TrayApp),
@@ -110,6 +114,7 @@ internal sealed class TrayApp : ApplicationContext
         _syncTimer.Tick += (_, _) => OnSyncTick();
         _syncTimer.Start();
         _shownReconcileTimer.Tick += (_, _) => OnShownReconcileTick();
+        _topologyTimer.Tick += (_, _) => OnTopologyTick();
     }
 
     /// <summary>Menüyü (yeniden) kurar; dil değişince tekrar çağrılır.</summary>
@@ -309,6 +314,105 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
+    private void OnPowerSuspend()
+    {
+        try
+        {
+            _syncTimer.Stop();
+            _shownReconcileTimer.Stop();
+            _topologyTimer.Stop();
+            _manager.PrepareForSuspend();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error(nameof(OnPowerSuspend), ex);
+            _manager.CancelDisplayTopologyChange();
+            ResumePeriodicSync();
+        }
+    }
+
+    private void OnPowerResume()
+    {
+        try
+        {
+            _manager.BeginResume();
+            ArmTopologyStabilization();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error(nameof(OnPowerResume), ex);
+            _manager.CancelDisplayTopologyChange();
+            ResumePeriodicSync();
+        }
+    }
+
+    private void OnDisplayChange()
+    {
+        try
+        {
+            _manager.BeginDisplayTopologyChange();
+            ArmTopologyStabilization();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error(nameof(OnDisplayChange), ex);
+            _manager.CancelDisplayTopologyChange();
+            ResumePeriodicSync();
+        }
+    }
+
+    private void ArmTopologyStabilization()
+    {
+        _syncTimer.Stop();
+        _shownReconcileTimer.Stop();
+        _lastTopologySignature = null;
+        _stableTopologySamples = 0;
+        if (!_topologyTimer.Enabled)
+        {
+            _topologyStartedAt = Environment.TickCount64;
+            _topologyTimer.Start();
+        }
+    }
+
+    private void OnTopologyTick()
+    {
+        try
+        {
+            string signature = string.Join("|", DisplayTopology.Capture().Values
+                .OrderBy(d => d.StableId, StringComparer.OrdinalIgnoreCase)
+                .Select(d => $"{d.StableId}:{d.DeviceName}:{d.Bounds}"));
+            if (string.Equals(signature, _lastTopologySignature, StringComparison.Ordinal))
+                _stableTopologySamples++;
+            else
+            {
+                _lastTopologySignature = signature;
+                _stableTopologySamples = 1;
+            }
+
+            if (_stableTopologySamples < 2 &&
+                Environment.TickCount64 - _topologyStartedAt < 3000)
+                return;
+
+            _topologyTimer.Stop();
+            _manager.CompleteDisplayTopologyChange();
+            ResumePeriodicSync();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error(nameof(OnTopologyTick), ex);
+            _topologyTimer.Stop();
+            _manager.CancelDisplayTopologyChange();
+            ResumePeriodicSync();
+        }
+    }
+
+    private void ResumePeriodicSync()
+    {
+        _idleSyncPasses = 0;
+        _syncTimer.Interval = 1000;
+        _syncTimer.Start();
+    }
+
     private void OnShownReconcileTick()
     {
         _shownReconcileTimer.Stop();
@@ -326,6 +430,7 @@ internal sealed class TrayApp : ApplicationContext
     private void OnForegroundEvent(IntPtr hook, uint eventType, IntPtr hwnd, int idObject,
         int idChild, uint thread, uint time)
     {
+        if (_manager.TopologyTransitionInProgress) return;
         if (idObject != Native.OBJID_WINDOW || hwnd == IntPtr.Zero) return;
         switch (eventType)
         {
@@ -350,6 +455,7 @@ internal sealed class TrayApp : ApplicationContext
 
     private void OnHotkey(int id)
     {
+        if (_manager.TopologyTransitionInProgress) return;
         AppLog.Info(nameof(OnHotkey), $"Hotkey id={id} received.");
         switch (id)
         {
@@ -463,6 +569,7 @@ internal sealed class TrayApp : ApplicationContext
         _resourcesDisposed = true;
         _syncTimer.Stop();
         _shownReconcileTimer.Stop();
+        _topologyTimer.Stop();
         for (int id = 1; id < HkDesktopBase + 9; id++)
             Native.UnregisterHotKey(_hotkeys.Handle, id);
         if (_foregroundHook != IntPtr.Zero)
@@ -491,6 +598,7 @@ internal sealed class TrayApp : ApplicationContext
         _osd.Dispose();
         _syncTimer.Dispose();
         _shownReconcileTimer.Dispose();
+        _topologyTimer.Dispose();
         _hotkeys.Dispose();
     }
 
@@ -504,10 +612,17 @@ internal sealed class TrayApp : ApplicationContext
     private sealed class HotkeyWindow : NativeWindow, IDisposable
     {
         private readonly Action<int> _onHotkey;
+        private readonly Action _onSuspend;
+        private readonly Action _onResume;
+        private readonly Action _onDisplayChange;
 
-        public HotkeyWindow(Action<int> onHotkey)
+        public HotkeyWindow(Action<int> onHotkey, Action onSuspend, Action onResume,
+            Action onDisplayChange)
         {
             _onHotkey = onHotkey;
+            _onSuspend = onSuspend;
+            _onResume = onResume;
+            _onDisplayChange = onDisplayChange;
             CreateHandle(new CreateParams());
         }
 
@@ -515,6 +630,22 @@ internal sealed class TrayApp : ApplicationContext
         {
             if (m.Msg == Native.WM_HOTKEY)
                 _onHotkey(m.WParam.ToInt32());
+            else if (m.Msg == Native.WM_DISPLAYCHANGE)
+                _onDisplayChange();
+            else if (m.Msg == Native.WM_POWERBROADCAST)
+            {
+                switch (m.WParam.ToInt32())
+                {
+                    case Native.PBT_APMSUSPEND:
+                        _onSuspend();
+                        break;
+                    case Native.PBT_APMRESUMECRITICAL:
+                    case Native.PBT_APMRESUMEAUTOMATIC:
+                    case Native.PBT_APMRESUMESUSPEND:
+                        _onResume();
+                        break;
+                }
+            }
             base.WndProc(ref m);
         }
 
