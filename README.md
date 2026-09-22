@@ -12,7 +12,7 @@ Windows virtual desktops are global: pressing `Win+Ctrl+←/→` switches **all 
 
 - 🖥 **Per-monitor desktops** — switching only affects the monitor under the mouse cursor; other monitors are untouched.
 - ➕ **Dynamic, independent desktop counts** — every monitor starts with 1 desktop; moving right at the end creates a new one (up to 9 per monitor). Unused desktops created this way are pruned after you leave them; empty desktops added in Overview remain until you close them.
-- 🔢 **Global number shortcuts** — `Ctrl+Alt+digit` jumps across monitors in screen order, while the Overview and OSD use clear per-monitor numbering.
+- 🔢 **Global number shortcuts** — `Ctrl+Alt+digit` jumps across monitors with the built-in display first, then external screens in screen order; the Overview always numbers the built-in display 1 and lists its row at the bottom.
 - 🔔 **Compact on-screen indicator** after every switch, without a focus-stealing slide animation.
 - 🗂 **Overview screen** (`Ctrl+Alt+↑`) — Mission Control-like grid with drag & drop: move windows between desktops and monitors, move whole desktops to another monitor, right-click move menu.
 - 📌 **Shared taskbar** (optional, tray menu) — windows from all desktops stay on the taskbar and Alt-Tab; clicking one jumps straight to its desktop.

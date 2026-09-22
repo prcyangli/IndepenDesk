@@ -12,7 +12,7 @@ I desktop virtuali di Windows sono globali: `Win+Ctrl+←/→` cambia **tutti i 
 
 - 🖥 **Desktop per monitor** — il cambio riguarda solo il monitor sotto il mouse; gli altri restano intatti.
 - ➕ **Numero di desktop dinamico e indipendente** — ogni monitor parte con 1 desktop; andando a destra alla fine se ne crea uno nuovo (fino a 9 per monitor). I desktop inutilizzati creati così vengono rimossi dopo averli lasciati; quelli vuoti aggiunti dalla Panoramica restano finché non vengono chiusi manualmente.
-- 🔢 **Scorciatoie numeriche globali** — `Ctrl+Alt+cifra` passa tra monitor nell'ordine degli schermi; Panoramica e OSD usano numeri locali per monitor.
+- 🔢 **Scorciatoie numeriche globali** — `Ctrl+Alt+cifra` passa tra monitor: prima il display integrato, poi gli schermi esterni in ordine; nella Panoramica il display integrato è sempre il monitor 1 e compare in fondo.
 - 🔔 **Indicatore compatto sullo schermo** dopo ogni cambio, senza animazioni che possano sottrarre il focus.
 - 🗂 **Panoramica** (`Ctrl+Alt+↑`) — griglia in stile Mission Control con trascinamento: sposta le finestre tra desktop e monitor, sposta interi desktop su un altro monitor, menu contestuale di spostamento.
 - 📌 **Barra delle applicazioni condivisa** (opzionale, menu della barra di sistema) — le finestre di tutti i desktop restano nella barra e in Alt-Tab; un clic salta direttamente al suo desktop.

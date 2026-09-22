@@ -12,7 +12,7 @@ Windows'un sanal masaüstleri globaldir: `Win+Ctrl+←/→` **tüm monitörleri 
 
 - 🖥 **Monitör başına masaüstleri** — geçiş yalnızca farenin olduğu monitörü etkiler; diğerlerine dokunulmaz.
 - ➕ **Dinamik ve bağımsız masaüstü sayıları** — her monitör 1 masaüstüyle başlar; sonda sağa gitmek yenisini oluşturur (monitör başına en fazla 9). Bu yolla oluşan kullanılmayan masaüstleri ayrılınca temizlenir; Genel Bakış'ta eklenen boş masaüstleri elle kapatılana kadar korunur.
-- 🔢 **Global rakam kısayolları** — `Ctrl+Alt+rakam` ekran sırasına göre monitörler arasında geçer; Genel Bakış ve OSD monitör başına yerel numaralar kullanır.
+- 🔢 **Global rakam kısayolları** — `Ctrl+Alt+rakam` monitörler arasında geçer: önce dahili ekran, sonra harici ekranlar ekran sırasına göre; Genel Bakış'ta dahili ekran her zaman 1 numaradır ve en altta listelenir.
 - 🔔 **Kompakt ekran göstergesi** her geçişten sonra görünür; odağı çalabilecek kaydırma animasyonu oynatılmaz.
 - 🗂 **Genel Bakış** (`Ctrl+Alt+↑`) — Mission Control benzeri ekran, sürükle-bırak: pencereleri masaüstleri ve monitörler arasında taşıyın, masaüstünü komple başka monitöre taşıyın, sağ tık taşıma menüsü.
 - 📌 **Paylaşılan görev çubuğu** (isteğe bağlı, tray menüsü) — tüm masaüstlerin pencereleri görev çubuğunda ve Alt-Tab'da kalır; birine tıklamak doğrudan masaüstüne geçer.

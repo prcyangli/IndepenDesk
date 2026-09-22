@@ -1573,15 +1573,24 @@ internal sealed class DesktopManager
 
     // ---------- numaralandırma ----------
 
-    /// <summary>Monitörleri ekran düzenine göre (soldan sağa) sıralar; numaralandırma bu sıraya dayanır.</summary>
+    /// <summary>
+    /// Numbering order for monitor ordinals and the Ctrl+Alt+1..9 global desktop
+    /// numbers: the internal display always comes first, external displays follow by
+    /// screen position (left-to-right, top-to-bottom within each group). Offline
+    /// monitors keep their group but sort last inside it.
+    /// </summary>
     private List<MonitorState> OrderedMonitors()
     {
         var bounds = Screen.AllScreens.ToDictionary(s => s.DeviceName, s => s.Bounds);
         return _monitors.Values
-            .OrderBy(m => bounds.TryGetValue(m.Device, out var b) ? b.X : int.MaxValue)
+            .OrderBy(m => !IsInternalMonitor(m))
+            .ThenBy(m => bounds.TryGetValue(m.Device, out var b) ? b.X : int.MaxValue)
             .ThenBy(m => bounds.TryGetValue(m.Device, out var b) ? b.Y : 0)
             .ToList();
     }
+
+    /// <summary>Whether this monitor is a built-in panel; an offline monitor keeps its last known identity.</summary>
+    private static bool IsInternalMonitor(MonitorState m) => m.LastDisplay?.IsInternal == true;
 
     private static SwitchInfo BuildInfo(MonitorState st)
     {
@@ -2385,16 +2394,22 @@ internal sealed class DesktopManager
         return changed;
     }
 
-    /// <summary>Genel bakış arayüzü için tam düzen (monitör başına yerel numaralarla).</summary>
+    /// <summary>Genel bakış arayüzü için tam düzen (monitör başına yerel numaralarla).
+    /// Ordinals follow the OrderedMonitors numbering order (the internal display is
+    /// always 1); the presentation order is flipped so the overview lists external
+    /// monitors first and pins the internal display's row to the bottom.</summary>
     public IReadOnlyList<MonitorEntry> GetLayout()
     {
         if (!_topologyTransitionInProgress)
             Sync();
+        var ordered = OrderedMonitors();
+        var ordinalByState = new Dictionary<MonitorState, int>(ReferenceEqualityComparer.Instance);
+        for (int i = 0; i < ordered.Count; i++)
+            ordinalByState[ordered[i]] = i + 1;
         var result = new List<MonitorEntry>();
-        int ordinal = 0;
-        foreach (var st in OrderedMonitors())
+        foreach (var st in ordered.Where(m => !IsInternalMonitor(m))
+                     .Concat(ordered.Where(IsInternalMonitor)))
         {
-            ordinal++;
             var desktops = new List<DesktopEntry>();
             for (int i = 0; i < st.Desktops.Count; i++)
             {
@@ -2408,7 +2423,7 @@ internal sealed class DesktopManager
                     .ToList();
                 desktops.Add(new DesktopEntry(i, i == st.Current, windows));
             }
-            result.Add(new MonitorEntry(st.Device, ordinal,
+            result.Add(new MonitorEntry(st.Device, ordinalByState[st],
                 OwnedDesktopCount(st) < MaxDesktopsPerMonitor, desktops));
         }
         return result;

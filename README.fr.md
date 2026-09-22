@@ -12,7 +12,7 @@ Les bureaux virtuels de Windows sont globaux : `Win+Ctrl+←/→` change **tous 
 
 - 🖥 **Bureaux par moniteur** — le changement n'affecte que le moniteur sous la souris ; les autres restent intacts.
 - ➕ **Nombre de bureaux dynamique et indépendant** — chaque moniteur démarre avec 1 bureau ; aller à droite en fin de liste en crée un nouveau (jusqu'à 9 par moniteur). Les bureaux inutilisés créés ainsi sont supprimés après les avoir quittés ; les bureaux vides ajoutés dans la vue d'ensemble restent jusqu'à leur fermeture manuelle.
-- 🔢 **Raccourcis numériques globaux** — `Ctrl+Alt+chiffre` navigue entre moniteurs dans l'ordre des écrans ; la vue d'ensemble et l'OSD utilisent une numérotation locale par moniteur.
+- 🔢 **Raccourcis numériques globaux** — `Ctrl+Alt+chiffre` navigue entre moniteurs : d'abord l'écran intégré, puis les écrans externes dans l'ordre ; dans la vue d'ensemble, l'écran intégré est toujours le moniteur 1 et figure en bas.
 - 🔔 **Indicateur compact à l'écran** après chaque changement, sans animation susceptible de prendre le focus.
 - 🗂 **Vue d'ensemble** (`Ctrl+Alt+↑`) — grille façon Mission Control avec glisser-déposer : déplacez les fenêtres entre bureaux et moniteurs, déplacez un bureau entier vers un autre moniteur, menu contextuel de déplacement.
 - 📌 **Barre des tâches partagée** (optionnel, menu de notification) — les fenêtres de tous les bureaux restent dans la barre des tâches et Alt-Tab ; un clic saute directement à son bureau.

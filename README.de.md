@@ -12,7 +12,7 @@ Virtuelle Desktops unter Windows sind global: `Win+Strg+←/→` wechselt **alle
 
 - 🖥 **Desktops pro Monitor** — ein Wechsel betrifft nur den Monitor unter der Maus; alle anderen bleiben unberührt.
 - ➕ **Dynamische, unabhängige Desktop-Anzahl** — jeder Monitor startet mit 1 Desktop; rechts am Ende wird ein neuer erstellt (max. 9 pro Monitor). So automatisch erstellte, unbenutzte Desktops werden nach dem Verlassen entfernt; in der Übersicht angelegte leere Desktops bleiben bis zum manuellen Schließen erhalten.
-- 🔢 **Globale Ziffernkürzel** — `Strg+Alt+Ziffer` springt in Bildschirmreihenfolge monitorübergreifend; Übersicht und OSD verwenden lokale Nummern je Monitor.
+- 🔢 **Globale Ziffernkürzel** — `Strg+Alt+Ziffer` springt monitorübergreifend: zuerst das eingebaute Display, danach externe Bildschirme in Bildschirmreihenfolge; in der Übersicht hat das eingebaute Display immer die Nummer 1 und steht ganz unten.
 - 🔔 **Kompakte Bildschirmanzeige** nach jedem Wechsel, ohne fokusraubende Wischanimation.
 - 🗂 **Übersicht** (`Strg+Alt+↑`) — Mission-Control-ähnliche Ansicht mit Drag & Drop: Fenster zwischen Desktops und Monitoren verschieben, ganze Desktops auf einen anderen Monitor ziehen, Rechtsklick-Menü.
 - 📌 **Gemeinsame Taskleiste** (optional, Tray-Menü) — Fenster aller Desktops bleiben in Taskleiste und Alt-Tab; ein Klick springt direkt zum zugehörigen Desktop.
