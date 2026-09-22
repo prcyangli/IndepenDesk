@@ -117,6 +117,12 @@ internal sealed class DesktopManager
     private const int ParkAnchorThickness = 2;
     private const int ParkRectTolerance = 2;
     private const int MinimizeForegroundSuppressMs = 750;
+    // After a display topology change many applications react to WM_DISPLAYCHANGE by
+    // restoring windows that IndepenDesk had parked on a non-current desktop. Those
+    // windows have a clear desktop membership and must be re-parked, not adopted into
+    // the current desktop (which would silently empty their home desktops). The
+    // disturbed period starts when the topology transaction completes.
+    private const int TopologyDisturbanceMs = 5000;
 
     private readonly Dictionary<string, MonitorState> _monitors = new();
     private readonly Dictionary<IntPtr, HiddenWindowRecord> _hidden = new();
@@ -127,6 +133,7 @@ internal sealed class DesktopManager
     private bool _topologyTransitionInProgress;
     private bool _hasSuspendSnapshot;
     private bool _borrowedSinceSuspend;
+    private long _topologyDisturbanceUntil;
     private readonly uint _ownPid = (uint)Environment.ProcessId;
     private readonly int _sessionId = GetCurrentSessionId();
     private readonly string _stateFile;
@@ -1717,6 +1724,7 @@ internal sealed class DesktopManager
             _topologyTransitionInProgress = false;
         }
 
+        _topologyDisturbanceUntil = Environment.TickCount64 + TopologyDisturbanceMs;
         Sync();
         AppLog.Info(nameof(CompleteDisplayTopologyChange),
             $"Topology stabilization completed; {_monitors.Count} display(s) online, " +
@@ -1728,6 +1736,7 @@ internal sealed class DesktopManager
     public void CancelDisplayTopologyChange()
     {
         _topologyTransitionInProgress = false;
+        _topologyDisturbanceUntil = Environment.TickCount64 + TopologyDisturbanceMs;
         AppLog.Warning(nameof(CancelDisplayTopologyChange),
             "Topology stabilization was cancelled after an unexpected error; periodic sync resumed.");
     }
@@ -1883,6 +1892,15 @@ internal sealed class DesktopManager
             _borrowedSinceSuspend = false;
         }
         _displayTopology = current;
+        if (changed)
+        {
+            // A real topology event (rebind, new display, borrow or return) was just
+            // applied — possibly by a periodic sync that raced ahead of the
+            // WM_DISPLAYCHANGE transaction. Start the disturbance window NOW so the
+            // very same sync pass re-parks membership windows that applications
+            // restored in reaction to the change instead of adopting them.
+            _topologyDisturbanceUntil = Environment.TickCount64 + TopologyDisturbanceMs;
+        }
         return changed;
     }
 
@@ -2317,10 +2335,17 @@ internal sealed class DesktopManager
             DesktopState? logicalOwner = _monitors.Values
                 .SelectMany(m => m.Desktops)
                 .FirstOrDefault(d => d.Windows.Contains(h));
-            if (logicalOwner is { ReturnWhenOnline: true } &&
+            bool ownerIsIncomingBorrowed = logicalOwner is { ReturnWhenOnline: true } &&
                 string.Equals(logicalOwner.HostStableId, st.StableId,
-                    StringComparison.OrdinalIgnoreCase) &&
-                !ReferenceEquals(logicalOwner, st.Desktops[st.Current]))
+                    StringComparison.OrdinalIgnoreCase);
+            // Right after any topology change applications restore parked windows in
+            // reaction to WM_DISPLAYCHANGE (no user intent behind it). Re-park those
+            // instead of adopting them, or every non-current desktop of the surviving
+            // display drains into the current one.
+            bool topologyDisturbed = Environment.TickCount64 < _topologyDisturbanceUntil;
+            if (logicalOwner != null &&
+                !ReferenceEquals(logicalOwner, st.Desktops[st.Current]) &&
+                (ownerIsIncomingBorrowed || topologyDisturbed))
             {
                 HideOrParkManagedWindows(new[] { h });
                 continue;
