@@ -70,6 +70,38 @@ internal sealed class DesktopManager
         public required Guid HostPreviousCurrent;
     }
 
+    /// <summary>
+    /// One window's pre-computed migration back to its home display: the recovery
+    /// record that must become authoritative (journal-first) plus the physical
+    /// placement that still has to be materialized and verified.
+    /// </summary>
+    private sealed record TopologyPlacementPlan(
+        IntPtr Handle,
+        HiddenWindowRecord? OriginalRecord,
+        HiddenWindowRecord? TargetRecord,
+        Rectangle TargetRect,
+        string TargetDevice,
+        string SourceDevice,
+        uint SavedShowCmd,
+        DisplaySnapshot Destination,
+        DesktopState? Desktop);
+
+    /// <summary>
+    /// In-process marker that a window's topology placement has not landed yet:
+    /// the journal already points at the home display while the physical placement
+    /// may still be on the borrowed one. Prevents Sync/taskbar paths from
+    /// interpreting the stale physical position as an app-initiated cross-display
+    /// move. Deliberately not persisted (the journal already holds the target).
+    /// </summary>
+    private sealed record PendingTopologyPlacement(
+        IntPtr Handle,
+        HiddenWindowRecord TargetRecord,
+        string TargetDevice,
+        Rectangle TargetRect,
+        bool Parked,
+        long MuteLogUntil,
+        long RetryNotBeforeTick);
+
     private sealed record HiddenWindowRecord(
         long Handle,
         int PointerSize,
@@ -115,7 +147,7 @@ internal sealed class DesktopManager
     private const int ParkVerifyPollDelayMs = 25;
     private const int ParkVerifyPollCount = 10;
     private const int ParkAnchorThickness = 2;
-    private const int ParkRectTolerance = 2;
+    private const int ParkRectTolerance = TopologyDecisions.RectTolerance;
     private const int MinimizeForegroundSuppressMs = 750;
     // After a display topology change many applications react to WM_DISPLAYCHANGE by
     // restoring windows that IndepenDesk had parked on a non-current desktop. Those
@@ -123,9 +155,19 @@ internal sealed class DesktopManager
     // the current desktop (which would silently empty their home desktops). The
     // disturbed period starts when the topology transaction completes.
     private const int TopologyDisturbanceMs = 5000;
+    // A pending topology placement keeps failing (window hung, app clamping its
+    // position): the retry warning is re-emitted at most this often per HWND so a
+    // stuck window cannot flood the log from the periodic sync.
+    private const long PendingPlacementLogIntervalMs = 30000;
+    // Minimum spacing between two physical retry attempts for the same pending
+    // placement: the periodic sync runs on the UI thread as often as every second,
+    // and a responsive-but-refusing window costs a full bounded retry round each
+    // time (see TryParkCandidateWithRetry).
+    private const long PendingPlacementRetryMs = 2000;
 
     private readonly Dictionary<string, MonitorState> _monitors = new();
     private readonly Dictionary<IntPtr, HiddenWindowRecord> _hidden = new();
+    private readonly Dictionary<IntPtr, PendingTopologyPlacement> _pendingTopologyPlacements = new();
     private readonly HashSet<DesktopState> _retainedEmptyDesktops = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<string, BorrowedDisplayState> _borrowedDisplays = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<IntPtr, WindowTransitSnapshot> _sleepWindowSnapshots = new();
@@ -278,12 +320,25 @@ internal sealed class DesktopManager
     private void SetHiddenRecord(IntPtr h, HiddenWindowRecord record)
     {
         if (_hidden.TryGetValue(h, out var existing) && existing == record) return;
+        // A journal rewrite to a different placement target invalidates any pending
+        // topology placement that still points at the old display/rectangle.
+        if (_pendingTopologyPlacements.TryGetValue(h, out var pending) &&
+            TopologyDecisions.ShouldWithdrawPending(
+                pending.TargetDevice, pending.TargetRect, record.ParkMonitor,
+                Rectangle.FromLTRB(record.NormalLeft, record.NormalTop,
+                    record.NormalRight, record.NormalBottom)))
+        {
+            _pendingTopologyPlacements.Remove(h);
+            AppLog.Info(nameof(SetHiddenRecord),
+                $"Pending topology placement of HWND={h} withdrawn: the journal target changed.");
+        }
         _hidden[h] = record;
         _hiddenVersion++;
     }
 
     private bool RemoveHiddenRecord(IntPtr h)
     {
+        _pendingTopologyPlacements.Remove(h);
         if (!_hidden.Remove(h)) return false;
         _hiddenVersion++;
         return true;
@@ -1468,14 +1523,26 @@ internal sealed class DesktopManager
         }
         if (!IsManagedWindowParked(h, record))
         {
-            // Already back on-screen (the app moved or restored it itself): ensure visibility, then clean up the record.
-            if (!Native.IsWindowVisible(h))
+            // A pending topology placement means the journal still points at the
+            // window's home display while the app already put the window back
+            // on-screen on the borrowed one. The record is authoritative: fall
+            // through to the recorded placement instead of adopting the on-screen
+            // position (the placement is not "done" until it lands on the target).
+            if (TopologyDecisions.DecideUnparkEarlyReturn(_pendingTopologyPlacements.ContainsKey(h)) ==
+                TopologyDecisions.UnparkEarlyReturn.AdoptOnScreenPosition)
             {
-                Native.ShowWindow(h, Native.SW_SHOWNA);
-                if (!Native.IsWindowVisible(h)) return false;
+                // Already back on-screen (the app moved or restored it itself): ensure visibility, then clean up the record.
+                if (!Native.IsWindowVisible(h))
+                {
+                    Native.ShowWindow(h, Native.SW_SHOWNA);
+                    if (!Native.IsWindowVisible(h)) return false;
+                }
+                RemoveHiddenRecord(h);
+                return true;
             }
-            RemoveHiddenRecord(h);
-            return true;
+            AppLog.Info(nameof(UnparkManagedWindow),
+                $"HWND={h} is on-screen before its topology placement landed; " +
+                $"restoring it to the recorded display '{record.ParkMonitor}'.");
         }
         if (!RestoreParkedWindow(h, record))
         {
@@ -2158,7 +2225,50 @@ internal sealed class DesktopManager
             desktop.HostStableId = homeId;
             desktop.ReturnWhenOnline = false;
             home.Desktops.Add(desktop);
-            PrepareDesktopForReturn(desktop, group, returnedDisplay);
+        }
+
+        // Stage 1 (plan): compute the whole return group's placement plan against one
+        // topology snapshot, before any journal or physical placement is modified.
+        List<TopologyPlacementPlan> plans = returned
+            .SelectMany(d => BuildDesktopReturnPlans(d, group, returnedDisplay))
+            .ToList();
+
+        // Stage 2 (journal-first): persist every target record as one batch before a
+        // single HWND is touched. A crash afterwards leaves a journal that points at
+        // the final home display instead of a stale borrowed position.
+        bool journalPersisted = plans.Count == 0 || PersistReturnPlacementSnapshot(plans);
+        if (!journalPersisted)
+        {
+            // Keep the borrowed state so the next topology sync retries the return;
+            // the physical migration of this batch must not start. HostStableId stays
+            // with the previous host so SyncCore keeps treating re-shown windows of
+            // these desktops as incoming-borrowed (re-park, never adopt).
+            foreach (DesktopState desktop in returned)
+            {
+                desktop.ReturnWhenOnline = true;
+                desktop.HostStableId = group.HostStableId;
+            }
+            AppLog.Warning(nameof(ReturnBorrowedDisplay),
+                $"Could not persist the return plan for '{returnedDisplay.DeviceName}'; " +
+                "the physical migration was not started and the return will be retried.");
+        }
+        else
+        {
+            // Commit the in-memory journal and mark every placement as pending
+            // before the first Win32 call, then materialize each plan.
+            foreach (TopologyPlacementPlan plan in plans)
+            {
+                if (plan.TargetRecord is not { } target) continue;
+                SetHiddenRecord(plan.Handle, target);
+                _pendingTopologyPlacements[plan.Handle] = new PendingTopologyPlacement(
+                    plan.Handle, target, plan.TargetDevice, plan.TargetRect, target.Parked, 0, 0);
+                AppLog.Info(nameof(ReturnBorrowedDisplay),
+                    $"Topology placement planned: HWND={plan.Handle} -> '{plan.TargetDevice}' " +
+                    $"target=({plan.TargetRect.Left},{plan.TargetRect.Top},{plan.TargetRect.Right},{plan.TargetRect.Bottom}) " +
+                    $"parked={target.Parked}.");
+            }
+            foreach (TopologyPlacementPlan plan in plans)
+                ExecuteTopologyPlacementPlan(plan);
         }
 
         if (home.Desktops.Count == 0)
@@ -2166,16 +2276,23 @@ internal sealed class DesktopManager
         DesktopState? preferred = home.Desktops.FirstOrDefault(d => d.RuntimeId == group.PreferredCurrent);
         home.Current = preferred != null ? home.Desktops.IndexOf(preferred) : 0;
         RestoreManagedWindows(home.Desktops[home.Current].Windows);
-        _borrowedDisplays.Remove(homeId);
+        if (journalPersisted)
+            _borrowedDisplays.Remove(homeId);
         PersistHidden();
         AppLog.Info(nameof(ReturnBorrowedDisplay),
             $"Display '{returnedDisplay.DeviceName}' returned; restored {returned.Count} desktop(s) as a group.");
         return true;
     }
 
-    private void PrepareDesktopForReturn(DesktopState desktop, BorrowedDisplayState group,
-        DisplaySnapshot destination)
+    /// <summary>
+    /// Compute the per-window migration plan of one returning desktop. Pure with
+    /// respect to journal and placement: stale-HWND cleanup aside, no record is
+    /// written and no window is moved; callers persist and execute the batch.
+    /// </summary>
+    private List<TopologyPlacementPlan> BuildDesktopReturnPlans(DesktopState desktop,
+        BorrowedDisplayState group, DisplaySnapshot destination)
     {
+        var plans = new List<TopologyPlacementPlan>();
         DisplaySnapshot source = _displayTopology.Values.FirstOrDefault(d =>
                 string.Equals(d.StableId, group.HostStableId, StringComparison.OrdinalIgnoreCase))
             ?? group.HomeDisplay;
@@ -2206,23 +2323,223 @@ internal sealed class DesktopManager
 
             if (_hidden.TryGetValue(h, out HiddenWindowRecord? record) && MatchesWindowIdentity(h, record))
             {
-                SetHiddenRecord(h, record with
-                {
-                    NormalLeft = targetRect.Left,
-                    NormalTop = targetRect.Top,
-                    NormalRight = targetRect.Right,
-                    NormalBottom = targetRect.Bottom,
-                    ParkMonitor = destination.DeviceName
-                });
+                plans.Add(new TopologyPlacementPlan(
+                    h, record,
+                    record with
+                    {
+                        NormalLeft = targetRect.Left,
+                        NormalTop = targetRect.Top,
+                        NormalRight = targetRect.Right,
+                        NormalBottom = targetRect.Bottom,
+                        ParkMonitor = destination.DeviceName
+                    },
+                    targetRect, destination.DeviceName, source.DeviceName,
+                    unchecked((uint)record.SavedShowCmd), destination, desktop));
             }
             else if (Native.IsWindowVisible(h))
             {
+                // No recovery record (e.g. an unmanageable window): only the physical
+                // placement can be migrated; there is no journal to persist for it.
                 uint showCmd = _sleepWindowSnapshots.TryGetValue(h, out transit)
                     ? transit.ShowCmd
                     : 0;
-                ApplyTopologyPlacement(h, targetRect, showCmd, destination);
+                plans.Add(new TopologyPlacementPlan(
+                    h, null, null, targetRect, destination.DeviceName, source.DeviceName,
+                    showCmd, destination, desktop));
             }
         }
+        return plans;
+    }
+
+    /// <summary>Persist the target records of a return batch as one snapshot (§6: journal-first).</summary>
+    private bool PersistReturnPlacementSnapshot(List<TopologyPlacementPlan> plans)
+    {
+        var planned = _hidden.Values.ToDictionary(r => r.Handle);
+        foreach (TopologyPlacementPlan plan in plans)
+            if (plan.TargetRecord is { } target)
+                planned[target.Handle] = target;
+        return PersistHiddenSnapshot(planned.Values);
+    }
+
+    /// <summary>
+    /// Execute one planned placement. Record-bearing plans were already marked
+    /// pending; success clears the marker, a destroyed/reused HWND cleans up all of
+    /// its state, and a refusal keeps membership + journal + pending for a later
+    /// retry (§13: never silently damage the logical membership).
+    /// </summary>
+    private void ExecuteTopologyPlacementPlan(TopologyPlacementPlan plan)
+    {
+        IntPtr h = plan.Handle;
+        if (plan.TargetRecord == null)
+        {
+            bool landed = Native.IsWindow(h) && SafeToModifyWindow(h) &&
+                ApplyTopologyPlacement(h, plan.TargetRect, plan.SavedShowCmd, plan.Destination) &&
+                (Native.IsIconic(h)
+                    ? IsNormalPlacementAssignedToDisplay(h, plan.TargetDevice)
+                    : Native.GetWindowRect(h, out Native.RECT wr) &&
+                      IsRectAssignedToDisplay(FromRECT(wr), plan.TargetDevice));
+            if (landed)
+            {
+                AppLog.Info(nameof(ExecuteTopologyPlacementPlan),
+                    $"Topology placement applied: HWND={h} -> '{plan.TargetDevice}'.");
+            }
+            else
+            {
+                AppLog.Warning(nameof(ExecuteTopologyPlacementPlan),
+                    $"Could not move unrecorded HWND={h} to '{plan.TargetDevice}' while returning its desktop.");
+            }
+            return;
+        }
+
+        switch (TryMaterializeTopologyPlacement(plan))
+        {
+            case TopologyPlacementOutcome.Applied:
+                _pendingTopologyPlacements.Remove(h);
+                AppLog.Info(nameof(ExecuteTopologyPlacementPlan),
+                    $"Topology placement applied: HWND={h} -> '{plan.TargetDevice}'.");
+                break;
+            case TopologyPlacementOutcome.Destroyed:
+            case TopologyPlacementOutcome.IdentityMismatch:
+                // The HWND died or was reused mid-return: drop every trace of the old
+                // window; a replacement HWND goes through normal discovery.
+                plan.Desktop?.Windows.Remove(h);
+                RemoveHiddenRecord(h);
+                AppLog.Info(nameof(ExecuteTopologyPlacementPlan),
+                    $"Topology placement of HWND={h} dropped: the window was destroyed or its identity changed.");
+                break;
+            default:
+                LogPendingPlacementFailure(h, plan.TargetRecord);
+                break;
+        }
+    }
+
+    // TopologyPlacementOutcome lives at namespace level (see TopologyDecisions.cs).
+
+    /// <summary>
+    /// Materialize a journaled topology placement (§7): move the window's real
+    /// placement (or its minimized restore rectangle) to the target display while
+    /// preserving the hidden/parked representation, then verify the actual result —
+    /// Win32 boolean returns alone are not trusted.
+    /// </summary>
+    private TopologyPlacementOutcome TryMaterializeTopologyPlacement(TopologyPlacementPlan plan)
+    {
+        IntPtr h = plan.Handle;
+        HiddenWindowRecord target = plan.TargetRecord!;
+        if (!Native.IsWindow(h)) return TopologyPlacementOutcome.Destroyed;
+        if (!MatchesWindowIdentity(h, target)) return TopologyPlacementOutcome.IdentityMismatch;
+        if (plan.TargetRect.Width <= 0 || plan.TargetRect.Height <= 0 ||
+            !SafeToModifyWindow(h))
+            return TopologyPlacementOutcome.Failed;
+
+        if (target.Parked)
+        {
+            // Parked windows keep their minimized/off-screen representation; only the
+            // restore rectangle and the parking anchor migrate to the target display.
+            string sourceDevice = Native.GetMonitorDeviceOfWindow(h) ?? plan.SourceDevice;
+            if (!RepositionParkedWindowToTarget(h, target, plan.TargetRect, sourceDevice, plan.TargetDevice) ||
+                !MatchesWindowIdentity(h, target) || !IsManagedWindowParked(h, target))
+                return ClassifyPlacementFailure(h, target);
+            return TopologyPlacementOutcome.Applied;
+        }
+
+        // Hidden-mode window: preserve visible/iconic/zoomed semantics across the move.
+        bool wasVisible = Native.IsWindowVisible(h);
+        bool wasIconic = Native.IsIconic(h);
+        bool wasZoomed = Native.IsZoomed(h);
+        bool savedMaximized = target.SavedShowCmd == Native.SW_SHOWMAXIMIZED;
+        var placement = new Native.WINDOWPLACEMENT
+        {
+            length = (uint)Marshal.SizeOf<Native.WINDOWPLACEMENT>()
+        };
+        bool hasPlacement = Native.GetWindowPlacement(h, ref placement);
+
+        bool applied;
+        if (wasIconic)
+        {
+            // Move the restore rectangle through the verified show -> place ->
+            // re-minimize chain; RestoreIconicPlacement briefly shows the window,
+            // so a hidden window must be re-hidden afterwards (§7.3).
+            applied = RestoreIconicPlacement(h, plan.TargetRect);
+            if (applied && !wasVisible)
+            {
+                Native.ShowWindow(h, Native.SW_HIDE);
+                applied = !Native.IsWindowVisible(h) && Native.IsIconic(h);
+            }
+        }
+        else if (wasZoomed || savedMaximized)
+        {
+            // Live rectangle onto the target working area, normal rectangle onto the
+            // pre-computed target; keep the window hidden when it was hidden.
+            Rectangle area = plan.Destination.WorkingArea;
+            applied = Native.SetWindowPos(h, IntPtr.Zero, area.X, area.Y, area.Width, area.Height,
+                Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+            if (applied && hasPlacement)
+            {
+                placement.rcNormalPosition = ToRECT(plan.TargetRect);
+                placement.showCmd = Native.SW_SHOWMAXIMIZED;
+                applied = Native.SetWindowPlacement(h, ref placement);
+            }
+            if (applied && !wasVisible)
+            {
+                Native.ShowWindow(h, Native.SW_HIDE);
+                applied = !Native.IsWindowVisible(h);
+            }
+        }
+        else
+        {
+            applied = Native.SetWindowPos(h, IntPtr.Zero, plan.TargetRect.X, plan.TargetRect.Y,
+                plan.TargetRect.Width, plan.TargetRect.Height,
+                Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+        }
+        if (!applied) return ClassifyPlacementFailure(h, target);
+
+        // §7.4: verify what actually happened, not what the API promised.
+        bool verified = MatchesWindowIdentity(h, target) &&
+                        Native.IsWindowVisible(h) == wasVisible &&
+                        Native.IsIconic(h) == wasIconic &&
+                        Native.IsZoomed(h) == wasZoomed;
+        if (verified)
+        {
+            if (wasIconic)
+                verified = TryGetEffectiveWindowRect(h, out Rectangle normal) &&
+                           IsRectAssignedToDisplay(normal, plan.TargetDevice);
+            else if (wasZoomed || savedMaximized)
+                verified = Native.GetWindowRect(h, out Native.RECT live) &&
+                           IsRectAssignedToDisplay(FromRECT(live), plan.TargetDevice) &&
+                           IsNormalPlacementAssignedToDisplay(h, plan.TargetDevice);
+            else
+                verified = Native.GetWindowRect(h, out Native.RECT wr) &&
+                           IsRectAssignedToDisplay(FromRECT(wr), plan.TargetDevice);
+        }
+        return verified ? TopologyPlacementOutcome.Applied : ClassifyPlacementFailure(h, target);
+    }
+
+    /// <summary>A failed placement is only retriable while the same window still lives
+    /// behind the HWND; a destroyed or reused handle is a terminal outcome.</summary>
+    private TopologyPlacementOutcome ClassifyPlacementFailure(IntPtr h, HiddenWindowRecord target) =>
+        TopologyDecisions.ClassifyPlacementFailure(Native.IsWindow(h), MatchesWindowIdentity(h, target));
+
+    private static bool IsRectAssignedToDisplay(Rectangle rect, string device) =>
+        rect.Width > 0 && rect.Height > 0 &&
+        Screen.FromRectangle(rect).DeviceName == device;
+
+    /// <summary>Record a failed physical attempt (throttles the next retry) and emit a
+    /// rate-limited failure log for a pending topology placement (§14).</summary>
+    private void LogPendingPlacementFailure(IntPtr h, HiddenWindowRecord target)
+    {
+        if (!_pendingTopologyPlacements.TryGetValue(h, out PendingTopologyPlacement? pending)) return;
+        long now = Environment.TickCount64;
+        _pendingTopologyPlacements[h] = pending with
+        {
+            RetryNotBeforeTick = Math.Max(pending.RetryNotBeforeTick, now + PendingPlacementRetryMs),
+            MuteLogUntil = Math.Max(pending.MuteLogUntil, now + PendingPlacementLogIntervalMs)
+        };
+        if (now < pending.MuteLogUntil) return;
+        AppLog.Warning(nameof(TryMaterializeTopologyPlacement),
+            $"Topology placement verification failed for HWND={h}; kept the membership, the " +
+            $"journal and the pending placement targeting '{pending.TargetDevice}' " +
+            $"rect=({pending.TargetRect.Left},{pending.TargetRect.Top},{pending.TargetRect.Right},{pending.TargetRect.Bottom}); " +
+            $"retrying later. {DescribeWindow(h)}");
     }
 
     private Rectangle GetRecordedNormalRect(IntPtr h)
@@ -2267,6 +2584,16 @@ internal sealed class DesktopManager
     private void RewriteHiddenMonitorNames(IReadOnlyDictionary<string, string> changes)
     {
         if (changes.Count == 0) return;
+        // Rename pending placement targets first: SetHiddenRecord withdraws a pending
+        // whose target device no longer matches the rewritten record.
+        foreach ((IntPtr h, PendingTopologyPlacement pending) in _pendingTopologyPlacements.ToList())
+            if (pending.TargetRecord.ParkMonitor != null &&
+                changes.TryGetValue(pending.TargetRecord.ParkMonitor, out string? pendingDevice))
+                _pendingTopologyPlacements[h] = pending with
+                {
+                    TargetRecord = pending.TargetRecord with { ParkMonitor = pendingDevice },
+                    TargetDevice = pendingDevice
+                };
         foreach ((IntPtr h, HiddenWindowRecord record) in _hidden.ToList())
             if (record.ParkMonitor != null &&
                 changes.TryGetValue(record.ParkMonitor, out string? newDevice))
@@ -2337,6 +2664,34 @@ internal sealed class DesktopManager
             string? dev = Native.GetMonitorDeviceOfWindow(h);
             if (dev == null || !_monitors.TryGetValue(dev, out var st)) continue;
 
+            // A topology placement that has not landed yet must not be interpreted as
+            // an app-initiated cross-display move: the journal and the membership are
+            // authoritative until the physical placement is verified on the target
+            // display. Suppress adoption; the retry pass below re-places the window.
+            if (_pendingTopologyPlacements.TryGetValue(h, out PendingTopologyPlacement? pending))
+            {
+                if (TopologyDecisions.DecideSyncPending(
+                        pendingExists: true, identityMatches: MatchesWindowIdentity(h, pending.TargetRecord)) ==
+                    TopologyDecisions.SyncPending.SuppressAdoption)
+                {
+                    // Rate-limited: a stuck window is re-suppressed on every sync pass.
+                    long now = Environment.TickCount64;
+                    if (now >= pending.MuteLogUntil)
+                    {
+                        _pendingTopologyPlacements[h] = pending with
+                            { MuteLogUntil = now + PendingPlacementLogIntervalMs };
+                        AppLog.Info(nameof(Sync),
+                            $"Sync adoption suppressed by pending placement: HWND={h} " +
+                            $"waits for '{pending.TargetDevice}'.");
+                    }
+                    continue;
+                }
+                // The HWND was reused: the pending belongs to the old window only.
+                _pendingTopologyPlacements.Remove(h);
+                AppLog.Info(nameof(Sync),
+                    $"Pending topology placement of HWND={h} dropped due to identity mismatch.");
+            }
+
             // A display-topology transaction deliberately keeps an incoming desktop
             // separate from the fallback's current desktop. If Windows made one of
             // its windows visible while moving it off the vanished display, retry the
@@ -2390,8 +2745,112 @@ internal sealed class DesktopManager
         foreach (var st in _monitors.Values)
             changed |= PruneTrailingEmpty(st);
 
+        // Pending placements were skipped by the adoption pass above; give each of
+        // them one bounded retry here (windows that are still hidden/parked included).
+        RetryPendingTopologyPlacements();
+
         PersistHidden();
         return changed;
+    }
+
+    /// <summary>The desktop a window currently belongs to, if any.</summary>
+    private (MonitorState Monitor, DesktopState Desktop, int Index)? FindWindowDesktop(IntPtr h)
+    {
+        foreach (var st in _monitors.Values)
+            for (int i = 0; i < st.Desktops.Count; i++)
+                if (st.Desktops[i].Windows.Contains(h))
+                    return (st, st.Desktops[i], i);
+        return null;
+    }
+
+    private void RemoveWindowMembership(IntPtr h)
+    {
+        foreach (var st in _monitors.Values)
+            foreach (var desktop in st.Desktops)
+                desktop.Windows.Remove(h);
+    }
+
+    /// <summary>
+    /// One bounded retry round for every pending topology placement (§8.1/§11): a
+    /// window whose placement has not landed keeps its membership and journal; this
+    /// pass re-attempts the physical migration and resolves visibility according to
+    /// the logical owner. Pending state never expires with the topology disturbance
+    /// window — it ends only with a verified placement or a dead/reused HWND.
+    /// </summary>
+    private void RetryPendingTopologyPlacements()
+    {
+        if (_pendingTopologyPlacements.Count == 0) return;
+        long now = Environment.TickCount64;
+        foreach ((IntPtr h, PendingTopologyPlacement pending) in _pendingTopologyPlacements.ToList())
+        {
+            bool alive = Native.IsWindow(h);
+            switch (TopologyDecisions.DecidePendingRetry(
+                alive, MatchesWindowIdentity(h, pending.TargetRecord), now, pending.RetryNotBeforeTick))
+            {
+                case TopologyDecisions.PendingRetry.DropStale:
+                    _pendingTopologyPlacements.Remove(h);
+                    RemoveWindowMembership(h);
+                    RemoveHiddenRecord(h);
+                    if (alive)
+                        AppLog.Info(nameof(RetryPendingTopologyPlacements),
+                            $"Pending topology placement of HWND={h} dropped due to identity mismatch.");
+                    break;
+                case TopologyDecisions.PendingRetry.Retry:
+                    RetryPendingTopologyPlacement(h, pending);
+                    break;
+            }
+        }
+    }
+
+    private void RetryPendingTopologyPlacement(IntPtr h, PendingTopologyPlacement pending)
+    {
+        if (!_displayTopology.TryGetValue(pending.TargetDevice, out DisplaySnapshot? destination))
+        {
+            // The target display is offline again: the borrow/return machinery owns
+            // this window now (it rewrites the journal and withdraws the pending).
+            return;
+        }
+        var owner = FindWindowDesktop(h);
+        var plan = new TopologyPlacementPlan(
+            h, pending.TargetRecord, pending.TargetRecord, pending.TargetRect,
+            pending.TargetDevice, Native.GetMonitorDeviceOfWindow(h) ?? pending.TargetDevice,
+            unchecked((uint)pending.TargetRecord.SavedShowCmd), destination, owner?.Desktop);
+
+        TopologyPlacementOutcome outcome = TryMaterializeTopologyPlacement(plan);
+        if (outcome == TopologyPlacementOutcome.Failed)
+        {
+            LogPendingPlacementFailure(h, pending.TargetRecord);
+            return;
+        }
+        if (outcome != TopologyPlacementOutcome.Applied)
+        {
+            _pendingTopologyPlacements.Remove(h);
+            RemoveWindowMembership(h);
+            RemoveHiddenRecord(h);
+            AppLog.Info(nameof(RetryPendingTopologyPlacement),
+                $"Pending topology placement of HWND={h} dropped: the window was destroyed or its identity changed.");
+            return;
+        }
+
+        _pendingTopologyPlacements.Remove(h);
+        AppLog.Info(nameof(RetryPendingTopologyPlacement),
+            $"Pending placement retry succeeded: HWND={h} landed on '{pending.TargetDevice}'.");
+        bool ownerIsCurrent = owner != null && owner.Value.Index == owner.Value.Monitor.Current;
+        bool parkedRepresentation = _hidden.TryGetValue(h, out var parked) && parked.Parked &&
+                                    IsManagedWindowParked(h, parked);
+        switch (TopologyDecisions.DecidePendingLandedVisibility(
+                   owner != null, ownerIsCurrent, Native.IsWindowVisible(h), parkedRepresentation))
+        {
+            case TopologyDecisions.PendingLandedVisibility.ShowWindow:
+                // The owner desktop is being presented: the window must be visible on it.
+                ShowOrUnparkManagedWindow(h);
+                break;
+            case TopologyDecisions.PendingLandedVisibility.RehideOrRepark:
+                // Re-hide or re-park a re-shown window of a non-current desktop now
+                // that it sits on the correct display.
+                HideOrParkManagedWindows(new[] { h });
+                break;
+        }
     }
 
     /// <summary>Genel bakış arayüzü için tam düzen (monitör başına yerel numaralarla).
@@ -2828,7 +3287,6 @@ internal sealed class DesktopManager
     }
 
     private enum TargetRestoreOutcome { Restored, Pruned, Failed }
-
     /// <summary>One restore attempt for a window of the target desktop. Pruned means the
     /// HWND was reused (identity mismatch removed its record) and its stale membership
     /// must be dropped instead of failing the whole transition.</summary>
@@ -3043,6 +3501,16 @@ internal sealed class DesktopManager
             return;
         }
 
+        // A pending topology placement means the window's physical display is stale
+        // (it still sits on the borrowed display while the journal already points at
+        // its home display). The journal is authoritative for this event: the jump
+        // must not be vetoed by the temporary physical position (§9).
+        string? pendingTargetDevice = null;
+        if (_pendingTopologyPlacements.TryGetValue(h, out PendingTopologyPlacement? pending) &&
+            string.Equals(pending.TargetDevice, record.ParkMonitor,
+                StringComparison.OrdinalIgnoreCase))
+            pendingTargetDevice = pending.TargetDevice;
+
         // The app already re-showed the window, so the membership lookup must not go through
         // Sync(): it would adopt the visible window into the current desktop and drop the
         // record this jump decision depends on.
@@ -3054,22 +3522,34 @@ internal sealed class DesktopManager
                 for (int i = 0; i < st.Desktops.Count; i++)
                     if (st.Desktops[i].Windows.Contains(h))
                     {
-                        if (i != st.Current && st.Device == dev)
+                        switch (TopologyDecisions.DecideHiddenTaskbarJump(
+                                   ownerIsCurrent: i == st.Current,
+                                   physicalDevice: dev,
+                                   ownerDevice: st.Device,
+                                   pendingTargetDevice: pendingTargetDevice))
                         {
-                            st.Desktops[i].LastActive = h;
-                            AppLog.Info(nameof(HandleForegroundActivated),
-                                $"Taskbar jump (hidden mode): HWND={h} -> '{st.Device}' desktop {i}.");
-                            SwitchToCore(st, i);
+                            case TopologyDecisions.HiddenTaskbarJump.Jump:
+                                if (pendingTargetDevice != null && st.Device != dev)
+                                    AppLog.Info(nameof(HandleForegroundActivated),
+                                        $"Taskbar activation used pending logical owner: HWND={h} physically on " +
+                                        $"'{dev}' but its topology placement targets '{st.Device}'.");
+                                st.Desktops[i].LastActive = h;
+                                AppLog.Info(nameof(HandleForegroundActivated),
+                                    $"Taskbar jump (hidden mode): HWND={h} -> '{st.Device}' desktop {i}.");
+                                // ShowManagedWindow re-places the window from the target
+                                // record; a verified restore clears the pending marker.
+                                SwitchToCore(st, i);
+                                break;
+                            case TopologyDecisions.HiddenTaskbarJump.LeaveForSync:
+                                // The app moved the window to another monitor before showing it:
+                                // leave it to Sync, which adopts it into that monitor's current desktop.
+                                AppLog.Info(nameof(HandleForegroundActivated),
+                                    $"Re-shown HWND={h} now lives on '{dev}' (desktop owner '{st.Device}'); leaving it for Sync adoption.");
+                                break;
                         }
-                        else if (i != st.Current)
-                        {
-                            // The app moved the window to another monitor before showing it:
-                            // leave it to Sync, which adopts it into that monitor's current desktop.
-                            AppLog.Info(nameof(HandleForegroundActivated),
-                                $"Re-shown HWND={h} now lives on '{dev}' (desktop owner '{st.Device}'); leaving it for Sync adoption.");
-                        }
-                        // i == st.Current cannot normally happen (hidden records exist only for
-                        // non-current desktops); if it ever does, let the next Sync clean up.
+                        // Ignore (the owner desktop is already current) lets the next
+                        // Sync clean up; hidden records exist only for non-current
+                        // desktops, so this cannot normally happen.
                         return;
                     }
 
@@ -3670,7 +4150,8 @@ internal sealed class DesktopManager
                Screen.FromRectangle(normal).DeviceName == device;
     }
 
-    /// <summary>Move a parked window across displays: map its saved on-screen rectangle by DPI and transfer the window to the target display's parking area.</summary>
+    /// <summary>Move a parked window across displays: map its saved on-screen rectangle by DPI
+    /// (outer layer) and transfer the window to the target display's parking area.</summary>
     private bool RepositionParkedWindow(IntPtr h, HiddenWindowRecord rec, string srcDevice, string dstDevice)
     {
         var srcScreen = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == srcDevice);
@@ -3680,6 +4161,19 @@ internal sealed class DesktopManager
 
         var saved = Rectangle.FromLTRB(rec.NormalLeft, rec.NormalTop, rec.NormalRight, rec.NormalBottom);
         Rectangle mapped = MapWindowRect(ToRECT(saved), srcScreen, dstScreen);
+        return RepositionParkedWindowToTarget(h, rec, mapped, srcDevice, dstDevice);
+    }
+
+    /// <summary>
+    /// Bottom layer of the parked cross-display move: transfer a parked window to a
+    /// pre-computed target rectangle, keeping the parked representation. Callers that
+    /// already own an exact mapping (the topology return path uses WindowTransitSnapshot
+    /// data) come here directly to avoid a second DPI round-trip.
+    /// </summary>
+    private bool RepositionParkedWindowToTarget(IntPtr h, HiddenWindowRecord rec, Rectangle mapped,
+        string srcDevice, string dstDevice)
+    {
+        if (!Native.IsWindow(h) || !MatchesWindowIdentity(h, rec)) return false;
 
         bool iconic = Native.IsIconic(h);
         Size size = mapped.Size;
@@ -3691,7 +4185,7 @@ internal sealed class DesktopManager
         {
             if (!TryGetMinimizedParkRect(dstDevice, mapped.Size, out park))
             {
-                AppLog.Warning(nameof(RepositionParkedWindow),
+                AppLog.Warning(nameof(RepositionParkedWindowToTarget),
                     $"No safe minimized parking anchor exists for HWND={h} on '{dstDevice}'.");
                 return false;
             }
@@ -3713,7 +4207,7 @@ internal sealed class DesktopManager
             ParkMonitor = dstDevice
         };
         var target = new ParkCandidate(h, updated, park, iconic);
-        bool moved = TryParkCandidateWithRetry(target, nameof(RepositionParkedWindow),
+        bool moved = TryParkCandidateWithRetry(target, nameof(RepositionParkedWindowToTarget),
             out ParkOutcome outcome, out ParkAttemptDiag? diag);
         if (moved)
         {
@@ -3730,15 +4224,15 @@ internal sealed class DesktopManager
             Rectangle sourcePark;
             if (iconic)
             {
-                rolledBack = TryGetMinimizedParkRect(srcDevice, saved.Size, out sourcePark) &&
+                rolledBack = TryGetMinimizedParkRect(srcDevice, mapped.Size, out sourcePark) &&
                     TryParkCandidateWithRetry(new ParkCandidate(h, rec, sourcePark, true),
-                        nameof(RepositionParkedWindow), out _, out _);
+                        nameof(RepositionParkedWindowToTarget), out _, out _);
             }
             else
             {
                 sourcePark = GetParkRect(srcDevice, size);
                 rolledBack = TryParkCandidateWithRetry(new ParkCandidate(h, rec, sourcePark, false),
-                    nameof(RepositionParkedWindow), out _, out _);
+                    nameof(RepositionParkedWindowToTarget), out _, out _);
             }
         }
 
@@ -3750,7 +4244,7 @@ internal sealed class DesktopManager
             : $"outcome={outcome}, apiSucceeded={diag.ApiSucceeded}, " +
               $"win32Error={(diag.Win32Error?.ToString() ?? "null")}, " +
               $"windowRect={FormatRect(diag.WindowRect)}, normalRect={FormatRect(diag.NormalRect)}";
-        RaiseWindowControlWarning(nameof(RepositionParkedWindow),
+        RaiseWindowControlWarning(nameof(RepositionParkedWindowToTarget),
             $"Could not re-park HWND={h} on '{dstDevice}'; " +
             $"rollbackSucceeded={rolledBack}; {diagnostic}", h);
         return false;
